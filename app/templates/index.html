@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ app_name }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='style.css') }}?v={{ asset_version }}" />
+  </head>
+  <body>
+    <div class="bg-layer"></div>
+    <header class="topbar">
+      <h1>{{ app_name }}</h1>
+      <p>Repository navigabile a cartelle con classificazione LLM (<strong>{{ ollama_model }}</strong>).</p>
+    </header>
+
+    <main class="workspace">
+      <section class="panel upload-panel">
+        <h2>Nuovo Contenuto</h2>
+
+        <div class="mode-switch" role="tablist" aria-label="Modalità upload">
+          <button id="mode-file" class="active" type="button">File / Media</button>
+          <button id="mode-link" type="button">Link / YouTube</button>
+        </div>
+
+        <form id="file-form" class="stack">
+          <label>
+            Titolo (opzionale)
+            <input name="title" type="text" placeholder="Titolo personalizzato" />
+          </label>
+          <label>
+            Descrizione (opzionale)
+            <textarea name="description" rows="3" placeholder="Contesto aggiuntivo"></textarea>
+          </label>
+          <label>
+            File
+            <input
+              name="file"
+              type="file"
+              required
+              accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.json,.xml,.yml,.yaml,.png,.jpg,.jpeg,.webp,.gif,.mp3,.wav,.m4a,.mp4,.mov,.mkv,.webm"
+            />
+          </label>
+          <button type="submit" class="btn-primary">Carica e classifica</button>
+        </form>
+
+        <form id="link-form" class="stack hidden">
+          <label>
+            URL
+            <input name="url" type="url" required placeholder="https://..." />
+          </label>
+          <label>
+            Titolo (opzionale)
+            <input name="title" type="text" placeholder="Titolo personalizzato" />
+          </label>
+          <label>
+            Descrizione (opzionale)
+            <textarea name="description" rows="3" placeholder="Contesto aggiuntivo"></textarea>
+          </label>
+          <button type="submit" class="btn-primary">Salva link e classifica</button>
+        </form>
+
+        <p id="upload-status" class="status" aria-live="polite"></p>
+
+        <div class="recent-block">
+          <div class="recent-header">
+            <h3>Ultimi Caricati</h3>
+            <button id="refresh-btn" type="button" class="btn-ghost btn-small">Aggiorna</button>
+          </div>
+          <ul id="recent-list" class="recent-list"></ul>
+        </div>
+      </section>
+
+      <section class="panel explorer-panel">
+        <div class="explorer-toolbar">
+          <input id="search-input" type="search" placeholder="Cerca nel contenuto della cartella selezionata..." />
+
+          <select id="source-select">
+            <option value="">Tutti i tipi</option>
+            <option value="file">File</option>
+            <option value="link">Link</option>
+          </select>
+
+          <select id="sort-select">
+            <option value="pertinence">Pertinenza</option>
+            <option value="date">Data upload</option>
+          </select>
+        </div>
+
+        <div class="explorer-body">
+          <aside class="folders-panel">
+            <div class="folders-header">
+              <h2>Cartelle Tematiche</h2>
+              <button id="clear-folder-btn" type="button" class="btn-ghost btn-small">Deseleziona</button>
+            </div>
+            <div id="folder-list" class="folder-list"></div>
+          </aside>
+
+          <section class="files-panel">
+            <div class="files-header">
+              <h2 id="selected-folder-title">Seleziona una cartella</h2>
+              <p id="selected-folder-meta">Clicca su una cartella a sinistra per vedere i file.</p>
+            </div>
+            <div id="result-list" class="result-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <template id="card-template">
+      <article class="card">
+        <div class="card-top">
+          <span class="badge category"></span>
+          <span class="badge theme"></span>
+          <span class="badge type"></span>
+        </div>
+        <h3 class="title"></h3>
+        <p class="summary"></p>
+        <div class="meta"></div>
+        <p class="upload-date"></p>
+        <div class="actions"></div>
+        <p class="path"></p>
+      </article>
+    </template>
+
+    <script src="{{ request.url_for('static', path='app.js') }}?v={{ asset_version }}" defer></script>
+  </body>
+</html>
