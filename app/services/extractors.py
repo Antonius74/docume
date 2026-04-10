@@ -1,4 +1,5 @@
 import base64
+import json
 import re
 import shutil
 import subprocess
@@ -243,10 +244,121 @@ def _youtube_video_id(url: str) -> str | None:
     return None
 
 
+def _extract_meta_content(soup: BeautifulSoup, *, name: str | None = None, prop: str | None = None) -> str:
+    if name:
+        node = soup.find("meta", attrs={"name": name})
+        if node and node.get("content"):
+            return str(node["content"]).strip()
+    if prop:
+        node = soup.find("meta", attrs={"property": prop})
+        if node and node.get("content"):
+            return str(node["content"]).strip()
+    return ""
+
+
+def _split_keywords(raw: str | list[str] | None) -> list[str]:
+    if not raw:
+        return []
+    values: list[str] = []
+    if isinstance(raw, list):
+        values = [str(item) for item in raw]
+    else:
+        values = re.split(r"[;,|]", str(raw))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = " ".join(value.split()).strip()
+        if not token:
+            continue
+        lowered = token.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(token[:64])
+        if len(out) >= 25:
+            break
+    return out
+
+
+def _parse_json_ld(soup: BeautifulSoup) -> list[dict]:
+    output: list[dict] = []
+    scripts = soup.find_all("script", attrs={"type": "application/ld+json"})
+    for script in scripts:
+        raw = script.string or script.get_text(strip=True)
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            continue
+
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    output.append(item)
+        elif isinstance(parsed, dict):
+            graph = parsed.get("@graph")
+            if isinstance(graph, list):
+                for item in graph:
+                    if isinstance(item, dict):
+                        output.append(item)
+            else:
+                output.append(parsed)
+    return output
+
+
+def _extract_primary_container_text(soup: BeautifulSoup) -> str:
+    for selector in ["script", "style", "noscript", "svg", "iframe", "header", "footer", "nav", "form", "aside"]:
+        for node in soup.select(selector):
+            node.decompose()
+
+    # Prioritize semantic containers where possible.
+    primary = soup.find("article") or soup.find("main")
+    if not primary:
+        candidates: list[tuple[int, object]] = []
+        for node in soup.find_all(["section", "div"]):
+            text = node.get_text(" ", strip=True)
+            if len(text) < 220:
+                continue
+            class_id = " ".join(node.get("class", []))
+            class_id = f"{class_id} {node.get('id', '')}".strip().lower()
+            p_count = len(node.find_all("p"))
+            hint_bonus = 800 if re.search(r"(article|content|post|story|entry|main|body)", class_id) else 0
+            score = len(text) + (p_count * 120) + hint_bonus
+            candidates.append((score, node))
+        if candidates:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            primary = candidates[0][1]
+
+    scope = primary or soup.body or soup
+    blocks: list[str] = []
+    seen: set[str] = set()
+    for node in scope.find_all(["h1", "h2", "h3", "p", "li"]):
+        text = node.get_text(" ", strip=True)
+        if len(text) < 14:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        blocks.append(text)
+        if len(blocks) >= 180:
+            break
+
+    return "\n".join(blocks).strip()
+
+
 async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> dict:
     title = "Untitled link"
     description = ""
     extracted_text = ""
+    site_name = ""
+    domain = (urlparse(url).netloc or "").lower()
+    page_kind = ""
+    keywords: list[str] = []
+    article_section = ""
+    youtube_channel = ""
 
     video_id = _youtube_video_id(url)
 
@@ -255,23 +367,109 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
             response = await client.get(url)
             response.raise_for_status()
 
-        content_type = response.headers.get("content-type", "")
-        body = response.text
+            content_type = response.headers.get("content-type", "")
+            body = response.text
 
-        if "text/html" in content_type:
-            soup = BeautifulSoup(body, "html.parser")
-            if soup.title and soup.title.text.strip():
-                title = soup.title.text.strip()
+            if "text/html" in content_type:
+                soup = BeautifulSoup(body, "html.parser")
+                if soup.title and soup.title.text.strip():
+                    title = soup.title.text.strip()
 
-            meta_desc = soup.find("meta", attrs={"name": "description"})
-            if meta_desc and meta_desc.get("content"):
-                description = meta_desc["content"].strip()
+                og_title = _extract_meta_content(soup, prop="og:title")
+                if og_title:
+                    title = og_title
 
-            nodes = soup.find_all(["h1", "h2", "h3", "p", "li"])
-            chunks = [node.get_text(" ", strip=True) for node in nodes]
-            extracted_text = "\n".join(chunk for chunk in chunks if chunk)
-        else:
-            extracted_text = body
+                description = (
+                    _extract_meta_content(soup, name="description")
+                    or _extract_meta_content(soup, prop="og:description")
+                    or _extract_meta_content(soup, name="twitter:description")
+                )
+                site_name = _extract_meta_content(soup, prop="og:site_name") or domain
+                page_kind = _extract_meta_content(soup, prop="og:type") or "webpage"
+                article_section = _extract_meta_content(soup, prop="article:section")
+                keywords.extend(_split_keywords(_extract_meta_content(soup, name="keywords")))
+
+                json_ld_items = _parse_json_ld(soup)
+                for item in json_ld_items:
+                    raw_type = item.get("@type")
+                    if isinstance(raw_type, list):
+                        type_text = " ".join(str(part) for part in raw_type)
+                    else:
+                        type_text = str(raw_type or "")
+
+                    if not page_kind and type_text:
+                        page_kind = type_text
+
+                    if not description and item.get("description"):
+                        description = str(item.get("description")).strip()
+
+                    if not title and item.get("headline"):
+                        title = str(item.get("headline")).strip()
+
+                    if not article_section and item.get("articleSection"):
+                        article_section = str(item.get("articleSection")).strip()
+
+                    if not site_name:
+                        publisher = item.get("publisher")
+                        if isinstance(publisher, dict) and publisher.get("name"):
+                            site_name = str(publisher.get("name")).strip()
+
+                    if video_id and not youtube_channel and item.get("author"):
+                        author = item.get("author")
+                        if isinstance(author, dict) and author.get("name"):
+                            youtube_channel = str(author.get("name")).strip()
+
+                    keywords.extend(_split_keywords(item.get("keywords")))
+
+                if video_id:
+                    # YouTube oEmbed gives reliable title/channel without requiring full DOM execution.
+                    try:
+                        oembed = await client.get(
+                            "https://www.youtube.com/oembed",
+                            params={"url": url, "format": "json"},
+                        )
+                        if oembed.status_code == 200:
+                            payload = oembed.json()
+                            if payload.get("title"):
+                                title = str(payload["title"]).strip()
+                            if payload.get("author_name"):
+                                youtube_channel = str(payload["author_name"]).strip()
+                            site_name = site_name or "YouTube"
+                            page_kind = page_kind or "video"
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                main_text = _extract_primary_container_text(soup)
+                if not main_text:
+                    # Last-resort fallback with stripped full text.
+                    main_text = " ".join(soup.get_text(" ", strip=True).split())
+
+                meta_lines = [
+                    f"Domain: {domain or 'N/A'}",
+                    f"Site name: {site_name or 'N/A'}",
+                    f"Page kind: {page_kind or 'N/A'}",
+                    f"Source URL: {url}",
+                ]
+                if article_section:
+                    meta_lines.append(f"Section: {article_section}")
+                if video_id:
+                    meta_lines.append(f"YouTube video id: {video_id}")
+                if youtube_channel:
+                    meta_lines.append(f"YouTube channel: {youtube_channel}")
+                if keywords:
+                    meta_lines.append(f"Keywords: {', '.join(keywords[:16])}")
+
+                extracted_text = "\n".join(
+                    [
+                        "[Metadata]",
+                        *meta_lines,
+                        "",
+                        "[Main Content]",
+                        main_text,
+                    ]
+                )
+            else:
+                extracted_text = body
     except Exception as exc:  # noqa: BLE001
         extracted_text = f"Link non scaricabile automaticamente. URL: {url}. Motivo: {exc}"
 
@@ -283,6 +481,12 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
         "description": description,
         "text": _truncate(extracted_text, max_chars),
         "youtube_video_id": video_id,
+        "site_name": site_name or domain,
+        "domain": domain,
+        "page_kind": page_kind,
+        "keywords": keywords[:20],
+        "section": article_section,
+        "youtube_channel": youtube_channel,
     }
 
 

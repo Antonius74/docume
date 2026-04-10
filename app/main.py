@@ -20,7 +20,7 @@ from app.services.semantic import (
     SemanticSearchService,
     score_resource_for_query,
 )
-from app.services.storage import save_in_thematic_folder
+from app.services.storage import remove_resource_artifacts, save_in_thematic_folder
 
 settings = get_settings()
 classifier = OllamaClassifier(
@@ -373,6 +373,20 @@ def get_resource(resource_id: str, db: Session = Depends(get_db)):
     if not resource:
         raise HTTPException(status_code=404, detail="Resource non trovata")
     return resource
+
+
+@app.delete("/api/resources/{resource_id}")
+def delete_resource(resource_id: str, db: Session = Depends(get_db)):
+    resource = db.get(Resource, resource_id)
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource non trovata")
+
+    cleanup = remove_resource_artifacts(resource, settings.files_root, settings.themes_root)
+
+    db.delete(resource)
+    db.commit()
+
+    return {"status": "deleted", "id": resource_id, "removed_paths": cleanup["removed_paths"]}
 
 
 @app.get("/api/themes", response_model=list[ThemeStatOut])

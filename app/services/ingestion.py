@@ -82,6 +82,7 @@ class IngestionService:
         inferred_title = title or extracted.get("title") or url
         extracted_text = extracted.get("text") or ""
         extracted_description = description or extracted.get("description")
+        source_name = extracted.get("site_name") or urlparse(normalized_url).netloc or inferred_title
         now_utc = datetime.now(timezone.utc)
 
         classification = await self.classifier.classify(
@@ -91,7 +92,7 @@ class IngestionService:
             extracted_text=extracted_text,
             mime_type="text/html",
             source_url=url,
-            source_name=urlparse(normalized_url).netloc or inferred_title,
+            source_name=source_name,
         )
 
         resource = Resource(

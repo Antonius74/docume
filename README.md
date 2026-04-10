@@ -3,7 +3,9 @@
 Prima versione di una piattaforma che:
 
 - riceve upload di file (`pdf`, testo, immagini, audio, video) e link (inclusi YouTube)
-- usa Ollama con modello `kimi-k2.5:cloud` per classificazione tematica basata sul contenuto interpretato dall'LLM
+- usa Ollama con modelli separati:
+  - `gpt-oss:120b` per link/siti e documenti testuali (`pdf`, `doc`, `docx`, `ppt`, `pptx`, `xls`, `xlsx`)
+  - `kimi-k2.5:cloud` per immagini (classificazione visuale)
 - salva file su filesystem e metadati/classificazione su PostgreSQL
 - organizza contenuti in cartelle tematiche
 - ricerca semantica LLM su titolo, metadati e contenuto estratto (`content_text`)
@@ -44,14 +46,14 @@ cp .env.example .env
 Il progetto usa di default:
 `postgresql+psycopg://postgres:postgres@127.0.0.1:5432/nexi_pay`
 
-`MAX_DOCUMENT_PAGES=10` limita l'estrazione documentale alle prime pagine (PDF/DOC/DOCX) per ingest più veloce.  
+`MAX_DOCUMENT_PAGES=10` limita l'estrazione documentale alle prime pagine/sheet/slide (`PDF/DOC/DOCX/PPT/PPTX/XLS/XLSX`) per ingest più veloce.  
 Puoi impostarlo a `5` o `10` in base al trade-off velocità/accuratezza.
 
-4. Avvia Ollama e il modello (adatta il nome modello se nel tuo catalogo è diverso):
+4. Avvia Ollama e i modelli (adatta i nomi se nel tuo catalogo sono diversi):
 
 ```bash
+ollama pull gpt-oss:120b
 ollama pull kimi-k2.5:cloud
-ollama run kimi-k2.5:cloud
 ```
 
 5. Avvia API/UI:
@@ -70,6 +72,7 @@ Apri [http://localhost:8000](http://localhost:8000)
   - include query semantica (`semantic=true`) con espansione termini (es. `math` -> statistica/geometria)
 - `GET /api/resources/recent` ultimi upload sintetici
 - `GET /api/resources/{id}` dettaglio elemento
+- `DELETE /api/resources/{id}` elimina risorsa da DB e filesystem (file + riferimento tematico)
 - `GET /api/themes` temi disponibili con conteggio
 - `GET /api/folders` preview cartelle tematiche
 - `GET /api/files/{id}` download file salvato

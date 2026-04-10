@@ -182,9 +182,6 @@ function renderCards(items) {
     node.querySelector(".title").textContent = item.title;
     node.querySelector(".summary").textContent = item.summary || "Nessuna sintesi disponibile.";
 
-    node.querySelector(".meta").textContent =
-      `Pertinenza ${item.combined_score.toFixed(2)} · Rilevanza ${item.relevance_score.toFixed(2)}`;
-
     const uploadDateNode = node.querySelector(".upload-date");
     uploadDateNode.textContent = `Data caricamento: ${formatUploadDate(item.uploaded_at)}`;
 
@@ -206,16 +203,36 @@ function renderCards(items) {
       actions.appendChild(fileLink);
     }
 
-    const pathNode = node.querySelector(".path");
-    if (item.thematic_path) {
-      pathNode.textContent = `Cartella: ${compactPath(item.thematic_path)}`;
-      pathNode.title = item.thematic_path;
-    } else {
-      pathNode.remove();
-    }
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "action-delete";
+    deleteBtn.textContent = "Elimina";
+    deleteBtn.addEventListener("click", () => {
+      deleteResource(item).catch((err) => setStatus(err.message, true));
+    });
+    actions.appendChild(deleteBtn);
 
     elements.resultList.appendChild(node);
   }
+}
+
+async function deleteResource(item) {
+  const label = item.title || item.id;
+  const confirmed = window.confirm(`Eliminare definitivamente "${label}"?`);
+  if (!confirmed) {
+    return;
+  }
+
+  setStatus(`Eliminazione in corso: ${label}...`);
+  const response = await fetch(`/api/resources/${item.id}`, { method: "DELETE" });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: "Errore sconosciuto" }));
+    throw new Error(err.detail || "Eliminazione fallita");
+  }
+
+  setStatus(`Eliminato: ${label}`);
+  await Promise.all([loadThemes(), loadRecent()]);
+  await loadResources();
 }
 
 async function loadResources() {

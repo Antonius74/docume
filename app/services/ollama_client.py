@@ -171,8 +171,70 @@ FALLBACK_THEME_TERMS: dict[str, list[str]] = {
         "intervista",
         "audio",
         "media",
+        "news",
+        "notizie",
+        "giornale",
+        "newspaper",
+        "quotidiano",
+        "cronaca",
+        "politica",
+        "attualita",
+        "attualità",
+        "economia",
+        "sport",
+        "esteri",
+        "breaking news",
+        "redazione",
+        "editoriale",
     ],
 }
+
+NEWS_LINK_TERMS = [
+    "news",
+    "notizie",
+    "giornale",
+    "newspaper",
+    "quotidiano",
+    "cronaca",
+    "politica",
+    "economia",
+    "attualita",
+    "attualità",
+    "ultime notizie",
+    "breaking news",
+    "esteri",
+    "redazione",
+    "editoriale",
+]
+
+MUSIC_LINK_TERMS = [
+    "musica",
+    "music",
+    "album",
+    "concert",
+    "concerto",
+    "cello",
+    "guitar",
+    "spotify",
+    "itunes",
+    "bach",
+    "beethoven",
+    "metallica",
+]
+
+NEWS_DOMAIN_HINTS = [
+    "repubblica.it",
+    "corriere.it",
+    "ansa.it",
+    "ilsole24ore.com",
+    "lastampa.it",
+    "rainews.it",
+    "bbc.",
+    "nytimes.com",
+    "theguardian.com",
+    "reuters.com",
+    "cnn.com",
+]
 
 
 @dataclass
@@ -244,6 +306,15 @@ class OllamaClassifier:
             "Se è presente un'immagine, usa anche il contenuto visivo per classificare. "
             "Restituisci solo JSON valido."
         )
+        link_specific_rules = ""
+        if source_type == "link":
+            link_specific_rules = (
+                "\nRegole link/siti:"
+                "\n- Usa il contenuto principale estratto e i metadati; ignora menu, footer e voci di navigazione."
+                "\n- Se la pagina è un quotidiano/news portal o contiene temi multipli di attualità, classifica in Media e Comunicazione."
+                "\n- NON classificare in Musica e Arte solo perché compaiono parole come 'musica' in menu/tassonomie."
+                "\n- Per YouTube classifica dal topic del video (titolo+descrizione+canale), non dalla piattaforma."
+            )
         canonical_choices = ", ".join(ALLOWED_CANONICAL_THEMES)
         user_prompt = (
             "Analizza il contenuto e restituisci SOLO questo JSON con queste chiavi:\n"
@@ -261,6 +332,7 @@ class OllamaClassifier:
             "I punteggi devono essere tra 0 e 1.\n"
             "La canonical_theme deve essere coerente con il tema dominante del contenuto.\n"
             "Se has_image=true, deduci tema e sotto-tema dagli elementi visivi principali.\n"
+            f"{link_specific_rules}\n"
             f"Input: {json.dumps(payload, ensure_ascii=False)}"
         )
 
@@ -286,7 +358,14 @@ class OllamaClassifier:
 
             content = response_json.get("message", {}).get("content", "")
             parsed = self._parse_json(content)
-            normalized = self._normalize(parsed, title=title)
+            normalized = self._normalize(
+                parsed,
+                title=title,
+                source_type=source_type,
+                extracted_text=extracted_text,
+                source_url=source_url,
+                description=description,
+            )
             return ClassificationResult(
                 title=normalized["title"],
                 theme=normalized["theme"],
@@ -364,7 +443,57 @@ class OllamaClassifier:
                 raise
             return json.loads(match.group(0))
 
-    def _normalize(self, value: dict, *, title: str) -> dict:
+    def _count_term_hits(self, text: str, terms: list[str]) -> int:
+        total = 0
+        for term in terms:
+            token = term.strip().lower()
+            if not token:
+                continue
+            if re.search(rf"\b{re.escape(token)}\b", text):
+                total += 1
+        return total
+
+    def _refine_link_theme(
+        self,
+        *,
+        canonical_theme: str,
+        parsed_theme: str,
+        title: str,
+        description: str | None,
+        extracted_text: str,
+        source_url: str | None,
+    ) -> tuple[str, str]:
+        context = " ".join(part for part in [title, description or "", extracted_text or ""] if part).lower()
+        news_hits = self._count_term_hits(context, NEWS_LINK_TERMS)
+        music_hits = self._count_term_hits(context, MUSIC_LINK_TERMS)
+
+        lowered_url = (source_url or "").lower()
+        if any(hint in lowered_url for hint in NEWS_DOMAIN_HINTS):
+            news_hits += 3
+
+        is_youtube = "youtube.com" in lowered_url or "youtu.be" in lowered_url
+
+        if canonical_theme == "Musica e Arte" and news_hits >= 3 and news_hits >= music_hits + 2:
+            return ("Media e Comunicazione", "News e Attualita")
+
+        if canonical_theme == "General" and news_hits >= 3:
+            return ("Media e Comunicazione", "News e Attualita")
+
+        if not is_youtube and news_hits >= 4 and news_hits >= music_hits + 2:
+            return ("Media e Comunicazione", "News e Attualita")
+
+        return (canonical_theme, parsed_theme)
+
+    def _normalize(
+        self,
+        value: dict,
+        *,
+        title: str,
+        source_type: str,
+        extracted_text: str,
+        source_url: str | None,
+        description: str | None,
+    ) -> dict:
         parsed_title = str(value.get("title") or title).strip()[:500]
         canonical_theme_raw = value.get("canonical_theme")
         parsed_theme = str(value.get("theme") or canonical_theme_raw or "General").strip()[:120]
@@ -375,6 +504,16 @@ class OllamaClassifier:
         theme_based_canonical = self._normalize_canonical_theme(parsed_theme)
         if theme_based_canonical != "General" and canonical_theme != theme_based_canonical:
             canonical_theme = theme_based_canonical
+
+        if source_type == "link":
+            canonical_theme, parsed_theme = self._refine_link_theme(
+                canonical_theme=canonical_theme,
+                parsed_theme=parsed_theme,
+                title=title,
+                description=description,
+                extracted_text=extracted_text,
+                source_url=source_url,
+            )
 
         parsed_subtheme = value.get("subtheme")
         parsed_subtheme = str(parsed_subtheme).strip()[:120] if parsed_subtheme else None
