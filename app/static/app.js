@@ -4,6 +4,8 @@ const state = {
   selectedTheme: "",
   selectedAuthor: "",
   selectedDetail: "",
+  expandedTheme: "",
+  expandedAuthor: "",
   themes: [],
   themeTree: [],
   authors: [],
@@ -107,6 +109,16 @@ function tooltipDescription(item) {
   return "Nessuna descrizione disponibile.";
 }
 
+function closeOpenInfoTooltips(exceptButton = null) {
+  document.querySelectorAll(".info-btn.tooltip-open").forEach((button) => {
+    if (exceptButton && button === exceptButton) {
+      return;
+    }
+    button.classList.remove("tooltip-open");
+    button.setAttribute("aria-expanded", "false");
+  });
+}
+
 function sourceInfo(item) {
   if (item.source_type === "link") {
     const url = (item.source_url || "").toLowerCase();
@@ -193,19 +205,41 @@ function renderFolderList() {
     return;
   }
 
+  const buildFolderContent = (label, countValue, options = {}) => {
+    const {
+      hasChildren = false,
+      expanded = false,
+    } = options;
+
+    const left = document.createElement("span");
+    left.className = "folder-left";
+
+    const disclosure = document.createElement("span");
+    disclosure.className = "folder-disclosure";
+    if (hasChildren) {
+      disclosure.textContent = expanded ? "▾" : "▸";
+    } else {
+      disclosure.classList.add("placeholder");
+      disclosure.textContent = "•";
+    }
+    left.appendChild(disclosure);
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "folder-name";
+    nameSpan.textContent = label;
+    left.appendChild(nameSpan);
+
+    const countSpan = document.createElement("span");
+    countSpan.className = "folder-count";
+    countSpan.textContent = String(countValue || 0);
+
+    return [left, countSpan];
+  };
+
   for (const themeNode of state.themeTree) {
     const branch = document.createElement("div");
     branch.className = "folder-branch";
-
-    const buildFolderContent = (label, countValue) => {
-      const nameSpan = document.createElement("span");
-      nameSpan.className = "folder-name";
-      nameSpan.textContent = label;
-      const countSpan = document.createElement("span");
-      countSpan.className = "folder-count";
-      countSpan.textContent = String(countValue || 0);
-      return [nameSpan, countSpan];
-    };
+    const isThemeExpanded = state.expandedTheme === themeNode.theme;
 
     const themeBtn = document.createElement("button");
     themeBtn.type = "button";
@@ -213,11 +247,17 @@ function renderFolderList() {
     if (state.selectedTheme === themeNode.theme && !state.selectedAuthor && !state.selectedDetail) {
       themeBtn.classList.add("active");
     }
-    for (const node of buildFolderContent(themeNode.theme, themeNode.count)) {
+    for (const node of buildFolderContent(themeNode.theme, themeNode.count, {
+      hasChildren: (themeNode.authors || []).length > 0,
+      expanded: isThemeExpanded,
+    })) {
       themeBtn.appendChild(node);
     }
     themeBtn.addEventListener("click", () => {
-      state.selectedTheme = themeNode.theme;
+      const willExpand = state.expandedTheme !== themeNode.theme;
+      state.expandedTheme = willExpand ? themeNode.theme : "";
+      state.expandedAuthor = "";
+      state.selectedTheme = willExpand ? themeNode.theme : "";
       state.selectedAuthor = "";
       state.selectedDetail = "";
       renderFolderList();
@@ -226,63 +266,77 @@ function renderFolderList() {
     });
     branch.appendChild(themeBtn);
 
-    const authorsWrap = document.createElement("div");
-    authorsWrap.className = "folder-children";
-    for (const authorNode of themeNode.authors || []) {
-      const authorBtn = document.createElement("button");
-      authorBtn.type = "button";
-      authorBtn.className = "folder-item level-author";
-      if (
-        state.selectedTheme === themeNode.theme &&
-        state.selectedAuthor === authorNode.author &&
-        !state.selectedDetail
-      ) {
-        authorBtn.classList.add("active");
-      }
-      for (const node of buildFolderContent(authorNode.author, authorNode.count)) {
-        authorBtn.appendChild(node);
-      }
-      authorBtn.addEventListener("click", () => {
-        state.selectedTheme = themeNode.theme;
-        state.selectedAuthor = authorNode.author;
-        state.selectedDetail = "";
-        renderFolderList();
-        renderFolderHeader();
-        Promise.all([loadAuthors(), loadResources()]).catch((err) => setStatus(err.message, true));
-      });
-      authorsWrap.appendChild(authorBtn);
+    if (isThemeExpanded && (themeNode.authors || []).length) {
+      const authorsWrap = document.createElement("div");
+      authorsWrap.className = "folder-children";
+      for (const authorNode of themeNode.authors || []) {
+        const authorKey = `${themeNode.theme}::${authorNode.author}`;
+        const isAuthorExpanded = state.expandedAuthor === authorKey;
 
-      const detailsWrap = document.createElement("div");
-      detailsWrap.className = "folder-children details";
-      for (const detailNode of authorNode.details || []) {
-        const detailBtn = document.createElement("button");
-        detailBtn.type = "button";
-        detailBtn.className = "folder-item level-detail";
+        const authorBtn = document.createElement("button");
+        authorBtn.type = "button";
+        authorBtn.className = "folder-item level-author";
         if (
           state.selectedTheme === themeNode.theme &&
           state.selectedAuthor === authorNode.author &&
-          state.selectedDetail === detailNode.detail
+          !state.selectedDetail
         ) {
-          detailBtn.classList.add("active");
+          authorBtn.classList.add("active");
         }
-        for (const node of buildFolderContent(detailNode.detail, detailNode.count)) {
-          detailBtn.appendChild(node);
+        for (const node of buildFolderContent(authorNode.author, authorNode.count, {
+          hasChildren: (authorNode.details || []).length > 0,
+          expanded: isAuthorExpanded,
+        })) {
+          authorBtn.appendChild(node);
         }
-        detailBtn.addEventListener("click", () => {
+        authorBtn.addEventListener("click", () => {
+          const willExpand = state.expandedAuthor !== authorKey;
+          state.expandedTheme = themeNode.theme;
+          state.expandedAuthor = willExpand ? authorKey : "";
           state.selectedTheme = themeNode.theme;
           state.selectedAuthor = authorNode.author;
-          state.selectedDetail = detailNode.detail;
+          state.selectedDetail = "";
           renderFolderList();
           renderFolderHeader();
           Promise.all([loadAuthors(), loadResources()]).catch((err) => setStatus(err.message, true));
         });
-        detailsWrap.appendChild(detailBtn);
+        authorsWrap.appendChild(authorBtn);
+
+        if (isAuthorExpanded && (authorNode.details || []).length) {
+          const detailsWrap = document.createElement("div");
+          detailsWrap.className = "folder-children details";
+          for (const detailNode of authorNode.details || []) {
+            const detailBtn = document.createElement("button");
+            detailBtn.type = "button";
+            detailBtn.className = "folder-item level-detail";
+            if (
+              state.selectedTheme === themeNode.theme &&
+              state.selectedAuthor === authorNode.author &&
+              state.selectedDetail === detailNode.detail
+            ) {
+              detailBtn.classList.add("active");
+            }
+            for (const node of buildFolderContent(detailNode.detail, detailNode.count, {
+              hasChildren: false,
+              expanded: false,
+            })) {
+              detailBtn.appendChild(node);
+            }
+            detailBtn.addEventListener("click", () => {
+              state.expandedTheme = themeNode.theme;
+              state.expandedAuthor = authorKey;
+              state.selectedTheme = themeNode.theme;
+              state.selectedAuthor = authorNode.author;
+              state.selectedDetail = detailNode.detail;
+              renderFolderList();
+              renderFolderHeader();
+              Promise.all([loadAuthors(), loadResources()]).catch((err) => setStatus(err.message, true));
+            });
+            detailsWrap.appendChild(detailBtn);
+          }
+          authorsWrap.appendChild(detailsWrap);
+        }
       }
-      if ((authorNode.details || []).length) {
-        authorsWrap.appendChild(detailsWrap);
-      }
-    }
-    if ((themeNode.authors || []).length) {
       branch.appendChild(authorsWrap);
     }
 
@@ -353,6 +407,8 @@ async function loadThemeTree() {
     state.selectedTheme = "";
     state.selectedAuthor = "";
     state.selectedDetail = "";
+    state.expandedTheme = "";
+    state.expandedAuthor = "";
   }
 
   const currentTheme = state.themeTree.find((theme) => theme.theme === state.selectedTheme);
@@ -363,6 +419,7 @@ async function loadThemeTree() {
   ) {
     state.selectedAuthor = "";
     state.selectedDetail = "";
+    state.expandedAuthor = "";
   }
 
   const currentAuthor = (currentTheme?.authors || []).find((author) => author.author === state.selectedAuthor);
@@ -372,6 +429,13 @@ async function loadThemeTree() {
     !(currentAuthor.details || []).some((detail) => detail.detail === state.selectedDetail)
   ) {
     state.selectedDetail = "";
+  }
+
+  if (state.selectedTheme) {
+    state.expandedTheme = state.selectedTheme;
+  }
+  if (state.selectedTheme && state.selectedAuthor) {
+    state.expandedAuthor = `${state.selectedTheme}::${state.selectedAuthor}`;
   }
 
   renderFolderList();
@@ -467,6 +531,26 @@ function renderCards(items) {
     const source = sourceInfo(item);
     typeBadge.textContent = source.label;
     typeBadge.classList.add(`source-${source.kind}`);
+
+    const cardBody = node.querySelector(".card-body");
+    const thumbRow = node.querySelector(".thumb-row");
+    const thumbImg = node.querySelector(".thumb-img");
+    const thumbUrl = sanitizeTooltipText(item.thumbnail_url || "");
+    if (thumbUrl) {
+      thumbImg.src = thumbUrl;
+      thumbImg.classList.remove("hidden-thumb");
+      cardBody.classList.remove("no-thumb");
+      thumbImg.onerror = () => {
+        thumbRow.classList.add("hidden-thumb");
+        thumbImg.removeAttribute("src");
+        cardBody.classList.add("no-thumb");
+      };
+    } else {
+      thumbRow.classList.add("hidden-thumb");
+      thumbImg.removeAttribute("src");
+      cardBody.classList.add("no-thumb");
+    }
+
     const authorName = sanitizeTooltipText(item.author_name || "") || "Sconosciuto";
     const authorBadge = document.createElement("span");
     authorBadge.className = "badge author";
@@ -484,8 +568,20 @@ function renderCards(items) {
     infoBtn.type = "button";
     infoBtn.className = "info-btn";
     infoBtn.textContent = "i";
-    infoBtn.title = tooltipDescription(item);
+    const tooltipText = tooltipDescription(item);
+    infoBtn.dataset.tooltip = tooltipText;
+    infoBtn.title = tooltipText;
     infoBtn.setAttribute("aria-label", "Mostra descrizione breve");
+    infoBtn.setAttribute("aria-expanded", "false");
+    infoBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const isOpening = !infoBtn.classList.contains("tooltip-open");
+      closeOpenInfoTooltips(isOpening ? infoBtn : null);
+      infoBtn.classList.toggle("tooltip-open", isOpening);
+      infoBtn.setAttribute("aria-expanded", isOpening ? "true" : "false");
+    });
     titleRow.appendChild(infoBtn);
 
     node.querySelector(".summary").remove();
@@ -728,6 +824,8 @@ elements.clearFolderBtn.addEventListener("click", () => {
   state.selectedTheme = "";
   state.selectedAuthor = "";
   state.selectedDetail = "";
+  state.expandedTheme = "";
+  state.expandedAuthor = "";
   renderFolderList();
   Promise.all([loadAuthors(), loadResources()]).catch((err) => setStatus(err.message, true));
 });
@@ -741,10 +839,31 @@ elements.authorSelect.addEventListener("change", () => {
   state.page = 1;
   state.selectedAuthor = elements.authorSelect.value;
   state.selectedDetail = "";
+  if (state.selectedTheme && state.selectedAuthor) {
+    state.expandedTheme = state.selectedTheme;
+    state.expandedAuthor = `${state.selectedTheme}::${state.selectedAuthor}`;
+  }
   renderFolderList();
   renderFolderHeader();
   debouncedSearch();
 });
 elements.sortSelect.addEventListener("change", debouncedSearch);
+
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    closeOpenInfoTooltips();
+    return;
+  }
+  if (!target.closest(".info-btn")) {
+    closeOpenInfoTooltips();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeOpenInfoTooltips();
+  }
+});
 
 bootstrap().catch((err) => setStatus(err.message, true));

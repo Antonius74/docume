@@ -18,6 +18,7 @@ class ResourceOut(BaseModel):
     description: str | None
     source_url: str | None
     youtube_video_id: str | None
+    thumbnail_url: str | None = None
     stored_path: str | None
     thematic_path: str | None
     mime_type: str | None

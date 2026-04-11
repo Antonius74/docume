@@ -154,6 +154,7 @@ class IngestionService:
                 "contenuto": classification.theme,
                 "dettaglio_contenuto": classification.subtheme,
                 "author": author_name,
+                "preview_image_url": self._sanitize_text(extracted.get("preview_image_url"), max_len=1000),
             }
         )
         safe_llm_raw = self._sanitize_json_like(classification.raw)
@@ -267,6 +268,7 @@ class IngestionService:
                 "contenuto": classification.theme,
                 "dettaglio_contenuto": classification.subtheme,
                 "author": author_name,
+                "preview_image_url": None,
             }
         )
         safe_llm_raw = self._sanitize_json_like(classification.raw)

@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import Text as SqlText
@@ -31,6 +31,7 @@ from app.services.semantic import (
     score_resource_for_query,
 )
 from app.services.storage import remove_resource_artifacts, save_in_thematic_folder
+from app.services.thumbnails import ensure_doc_thumbnail
 
 settings = get_settings()
 classifier = OllamaClassifier(
@@ -72,6 +73,59 @@ def _asset_version() -> int:
         except OSError:
             continue
     return max(mtimes) if mtimes else int(datetime.now(timezone.utc).timestamp())
+
+
+def _link_thumbnail_from_labels(resource: Resource) -> str | None:
+    labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+    candidates = [
+        labels.get("preview_image_url"),
+        labels.get("thumbnail_url"),
+        labels.get("image_url"),
+    ]
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value.startswith("http://") or value.startswith("https://"):
+            return value[:1200]
+    return None
+
+
+def _resource_thumbnail_url(resource: Resource) -> str | None:
+    if resource.source_type == "file":
+        mime = (resource.mime_type or "").lower()
+        if mime.startswith("image/"):
+            return f"/api/files/{resource.id}"
+        if resource.stored_path:
+            return f"/api/resources/{resource.id}/thumbnail"
+        return None
+
+    if resource.source_type == "link":
+        if resource.youtube_video_id:
+            return f"https://i.ytimg.com/vi/{resource.youtube_video_id}/hqdefault.jpg"
+
+        link_thumb = _link_thumbnail_from_labels(resource)
+        if link_thumb:
+            return link_thumb
+
+        if resource.source_url:
+            try:
+                host = (urlparse(resource.source_url).hostname or "").strip()
+            except Exception:  # noqa: BLE001
+                host = ""
+            if host:
+                return f"https://www.google.com/s2/favicons?domain={host}&sz=128"
+
+    return None
+
+
+def _attach_thumbnail(resource: Resource) -> Resource:
+    setattr(resource, "thumbnail_url", _resource_thumbnail_url(resource))
+    return resource
+
+
+def _attach_thumbnails(resources: list[Resource]) -> list[Resource]:
+    for resource in resources:
+        _attach_thumbnail(resource)
+    return resources
 
 
 @app.on_event("startup")
@@ -305,7 +359,7 @@ async def ingest_file(
             title=title,
             description=description,
         )
-        return resource
+        return _attach_thumbnail(resource)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -321,7 +375,7 @@ async def ingest_link(payload: IngestLinkRequest, db: Session = Depends(get_db))
             title=payload.title,
             description=payload.description,
         )
-        return resource
+        return _attach_thumbnail(resource)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Errore ingest link: {exc}") from exc
 
@@ -451,7 +505,7 @@ def list_resources(
             query = query.order_by(asc(sort_column), asc(Resource.uploaded_at))
         items = db.scalars(query.offset(offset).limit(page_size)).all()
 
-    return ResourceListOut(total=total, page=page, page_size=page_size, items=items)
+    return ResourceListOut(total=total, page=page, page_size=page_size, items=_attach_thumbnails(items))
 
 
 @app.get("/api/resources/recent", response_model=list[ResourceOut])
@@ -460,7 +514,7 @@ def recent_resources(
     db: Session = Depends(get_db),
 ):
     rows = db.scalars(select(Resource).order_by(desc(Resource.uploaded_at)).limit(limit)).all()
-    return rows
+    return _attach_thumbnails(rows)
 
 
 @app.get("/api/resources/{resource_id}", response_model=ResourceOut)
@@ -468,7 +522,7 @@ def get_resource(resource_id: str, db: Session = Depends(get_db)):
     resource = db.get(Resource, resource_id)
     if not resource:
         raise HTTPException(status_code=404, detail="Resource non trovata")
-    return resource
+    return _attach_thumbnail(resource)
 
 
 @app.delete("/api/resources/{resource_id}")
@@ -477,12 +531,51 @@ def delete_resource(resource_id: str, db: Session = Depends(get_db)):
     if not resource:
         raise HTTPException(status_code=404, detail="Resource non trovata")
 
-    cleanup = remove_resource_artifacts(resource, settings.files_root, settings.themes_root)
+    cleanup = remove_resource_artifacts(
+        resource,
+        settings.files_root,
+        settings.themes_root,
+        settings.thumbnails_root,
+    )
 
     db.delete(resource)
     db.commit()
 
     return {"status": "deleted", "id": resource_id, "removed_paths": cleanup["removed_paths"]}
+
+
+@app.get("/api/resources/{resource_id}/thumbnail")
+def get_resource_thumbnail(resource_id: str, db: Session = Depends(get_db)):
+    resource = db.get(Resource, resource_id)
+    if not resource:
+        raise HTTPException(status_code=404, detail="Resource non trovata")
+
+    if resource.source_type == "file":
+        if not resource.stored_path:
+            raise HTTPException(status_code=404, detail="Thumbnail non disponibile")
+        source_file = Path(resource.stored_path)
+        if not source_file.exists():
+            raise HTTPException(status_code=404, detail="File origine non trovato")
+
+        mime = (resource.mime_type or "").lower()
+        if mime.startswith("image/"):
+            return FileResponse(path=source_file, media_type=resource.mime_type or "image/*")
+
+        thumb = ensure_doc_thumbnail(
+            source_path=str(source_file),
+            resource_id=resource.id,
+            thumbnails_root=settings.thumbnails_root,
+        )
+        if thumb and thumb.exists():
+            media_type = "image/png" if thumb.suffix.lower() == ".png" else "image/jpeg"
+            return FileResponse(path=thumb, media_type=media_type)
+        raise HTTPException(status_code=404, detail="Thumbnail non disponibile")
+
+    thumb_url = _resource_thumbnail_url(resource)
+    if thumb_url and thumb_url.startswith(("http://", "https://")):
+        return RedirectResponse(url=thumb_url, status_code=307)
+
+    raise HTTPException(status_code=404, detail="Thumbnail non disponibile")
 
 
 @app.get("/api/themes", response_model=list[ThemeStatOut])

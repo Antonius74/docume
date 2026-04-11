@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -469,6 +469,7 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
     article_section = ""
     youtube_channel = ""
     author_name = ""
+    preview_image_url = ""
 
     video_id = _youtube_video_id(url)
 
@@ -498,6 +499,12 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                 page_kind = _extract_meta_content(soup, prop="og:type") or "webpage"
                 article_section = _extract_meta_content(soup, prop="article:section")
                 keywords.extend(_split_keywords(_extract_meta_content(soup, name="keywords")))
+                preview_image_url = (
+                    _extract_meta_content(soup, prop="og:image")
+                    or _extract_meta_content(soup, name="twitter:image")
+                )
+                if preview_image_url:
+                    preview_image_url = urljoin(url, preview_image_url)
                 author_name = (
                     _sanitize_author_candidate(_extract_meta_content(soup, name="author"))
                     or _sanitize_author_candidate(_extract_meta_content(soup, prop="article:author"))
@@ -559,6 +566,8 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                                 youtube_channel = _sanitize_author_candidate(payload.get("author_name")) or youtube_channel
                                 if not author_name:
                                     author_name = _sanitize_author_candidate(payload.get("author_name"))
+                            if payload.get("thumbnail_url"):
+                                preview_image_url = str(payload.get("thumbnail_url")).strip()
                             site_name = site_name or "YouTube"
                             page_kind = page_kind or "video"
                     except Exception:  # noqa: BLE001
@@ -615,6 +624,7 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
         "section": article_section,
         "youtube_channel": youtube_channel,
         "author": _sanitize_author_candidate(author_name or youtube_channel),
+        "preview_image_url": preview_image_url[:1000] if preview_image_url else "",
     }
 
 

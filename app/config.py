@@ -55,6 +55,10 @@ class Settings(BaseSettings):
         return self.storage_root / "themes"
 
     @property
+    def thumbnails_root(self) -> Path:
+        return self.storage_root / "thumbnails"
+
+    @property
     def categories_catalog_path(self) -> Path:
         return self.storage_root / "categories_catalog.json"
 
@@ -62,6 +66,7 @@ class Settings(BaseSettings):
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self.files_root.mkdir(parents=True, exist_ok=True)
         self.themes_root.mkdir(parents=True, exist_ok=True)
+        self.thumbnails_root.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

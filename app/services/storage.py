@@ -202,7 +202,12 @@ def _prune_empty_parents(start: Path, stop: Path) -> None:
         current = parent
 
 
-def remove_resource_artifacts(resource: Resource, files_root: Path, themes_root: Path) -> dict[str, list[str]]:
+def remove_resource_artifacts(
+    resource: Resource,
+    files_root: Path,
+    themes_root: Path,
+    thumbnails_root: Path | None = None,
+) -> dict[str, list[str]]:
     removed_paths: list[str] = []
 
     # Remove current thematic reference path if present.
@@ -228,5 +233,14 @@ def remove_resource_artifacts(resource: Resource, files_root: Path, themes_root:
         if _safe_unlink(stored_path):
             removed_paths.append(str(stored_path))
             _prune_empty_parents(stored_path.parent, files_root)
+
+    if thumbnails_root:
+        try:
+            thumbnails_root_resolved = thumbnails_root.resolve()
+        except Exception:  # noqa: BLE001
+            thumbnails_root_resolved = thumbnails_root
+        for thumb in thumbnails_root_resolved.glob(f"{resource.id}.*"):
+            if _safe_unlink(thumb):
+                removed_paths.append(str(thumb))
 
     return {"removed_paths": removed_paths}
