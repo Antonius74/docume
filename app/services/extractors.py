@@ -30,8 +30,17 @@ _TEXT_EXTENSIONS = {
 }
 
 
+def _sanitize_text_content(value: str) -> str:
+    if not value:
+        return ""
+    cleaned = str(value).replace("\x00", " ")
+    cleaned = re.sub(r"[\x01-\x08\x0B\x0C\x0E-\x1F]+", " ", cleaned)
+    return cleaned
+
+
 def _truncate(value: str, max_chars: int) -> str:
-    return value[:max_chars].strip()
+    sanitized = _sanitize_text_content(value)
+    return sanitized[:max_chars].strip()
 
 
 def _extract_docx_preview(file_path: Path, max_document_pages: int) -> str:
@@ -281,6 +290,59 @@ def _split_keywords(raw: str | list[str] | None) -> list[str]:
     return out
 
 
+def _sanitize_author_candidate(value: object) -> str:
+    raw = _sanitize_text_content(str(value or ""))
+    cleaned = re.sub(r"\s+", " ", raw).strip(" .,:;|-")
+    cleaned = re.sub(r"^(by|autore|author)\s*[:\-]\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) > 160:
+        cleaned = cleaned[:160].rstrip(" .,:;|-")
+
+    lowered = cleaned.lower()
+    if lowered in {"unknown", "sconosciuto", "n/a", "na", "none", "null", "staff", "team"}:
+        return ""
+    return cleaned
+
+
+def _extract_author_from_jsonld_field(author_field: object) -> str:
+    if isinstance(author_field, str):
+        return _sanitize_author_candidate(author_field)
+    if isinstance(author_field, dict):
+        for key in ("name", "headline", "alternateName"):
+            if author_field.get(key):
+                value = _sanitize_author_candidate(author_field.get(key))
+                if value:
+                    return value
+        return ""
+    if isinstance(author_field, list):
+        for item in author_field:
+            candidate = _extract_author_from_jsonld_field(item)
+            if candidate:
+                return candidate
+    return ""
+
+
+def _extract_office_core_author(file_path: Path) -> str:
+    try:
+        with zipfile.ZipFile(file_path, "r") as archive:
+            if "docProps/core.xml" not in archive.namelist():
+                return ""
+            root = ET.fromstring(archive.read("docProps/core.xml"))
+    except Exception:  # noqa: BLE001
+        return ""
+
+    for node in root.iter():
+        tag = node.tag.lower()
+        if not node.text:
+            continue
+        if tag.endswith("}creator") or tag.endswith("}lastmodifiedby"):
+            value = _sanitize_author_candidate(node.text)
+            if value:
+                return value
+    return ""
+
+
 def _parse_json_ld(soup: BeautifulSoup) -> list[dict]:
     output: list[dict] = []
     scripts = soup.find_all("script", attrs={"type": "application/ld+json"})
@@ -359,6 +421,7 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
     keywords: list[str] = []
     article_section = ""
     youtube_channel = ""
+    author_name = ""
 
     video_id = _youtube_video_id(url)
 
@@ -388,6 +451,11 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                 page_kind = _extract_meta_content(soup, prop="og:type") or "webpage"
                 article_section = _extract_meta_content(soup, prop="article:section")
                 keywords.extend(_split_keywords(_extract_meta_content(soup, name="keywords")))
+                author_name = (
+                    _sanitize_author_candidate(_extract_meta_content(soup, name="author"))
+                    or _sanitize_author_candidate(_extract_meta_content(soup, prop="article:author"))
+                    or _sanitize_author_candidate(_extract_meta_content(soup, name="twitter:creator"))
+                )
 
                 json_ld_items = _parse_json_ld(soup)
                 for item in json_ld_items:
@@ -414,6 +482,9 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                         if isinstance(publisher, dict) and publisher.get("name"):
                             site_name = str(publisher.get("name")).strip()
 
+                    if not author_name and item.get("author"):
+                        author_name = _extract_author_from_jsonld_field(item.get("author"))
+
                     if video_id and not youtube_channel and item.get("author"):
                         author = item.get("author")
                         if isinstance(author, dict) and author.get("name"):
@@ -434,6 +505,8 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                                 title = str(payload["title"]).strip()
                             if payload.get("author_name"):
                                 youtube_channel = str(payload["author_name"]).strip()
+                                if not author_name:
+                                    author_name = _sanitize_author_candidate(payload.get("author_name"))
                             site_name = site_name or "YouTube"
                             page_kind = page_kind or "video"
                     except Exception:  # noqa: BLE001
@@ -456,6 +529,8 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                     meta_lines.append(f"YouTube video id: {video_id}")
                 if youtube_channel:
                     meta_lines.append(f"YouTube channel: {youtube_channel}")
+                if author_name:
+                    meta_lines.append(f"Author: {author_name}")
                 if keywords:
                     meta_lines.append(f"Keywords: {', '.join(keywords[:16])}")
 
@@ -487,6 +562,7 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
         "keywords": keywords[:20],
         "section": article_section,
         "youtube_channel": youtube_channel,
+        "author": _sanitize_author_candidate(author_name or youtube_channel),
     }
 
 
@@ -504,13 +580,14 @@ def extract_from_file(path: str, mime_type: str | None, max_chars: int, max_docu
             ),
             "image_b64": base64.b64encode(image_bytes).decode("utf-8"),
             "language": None,
+            "author": None,
         }
 
     if mime == "application/pdf" or ext == ".pdf":
         try:
             reader = PdfReader(str(file_path))
         except Exception as exc:  # noqa: BLE001
-            return {"text": f"PDF {file_path.name} non leggibile: {exc}", "language": None}
+            return {"text": f"PDF {file_path.name} non leggibile: {exc}", "language": None, "author": None}
         text_parts = []
         for page in reader.pages[: max(1, max_document_pages)]:
             try:
@@ -523,7 +600,16 @@ def extract_from_file(path: str, mime_type: str | None, max_chars: int, max_docu
             if pdf_text
             else f"PDF {file_path.name} senza testo estraibile nelle prime {max(1, max_document_pages)} pagine."
         )
-        return {"text": _truncate(pdf_text, max_chars), "language": None}
+        author = ""
+        try:
+            meta = reader.metadata
+            if meta:
+                author = _sanitize_author_candidate(
+                    getattr(meta, "author", None) or meta.get("/Author")  # type: ignore[attr-defined]
+                )
+        except Exception:  # noqa: BLE001
+            author = ""
+        return {"text": _truncate(pdf_text, max_chars), "language": None, "author": author or None}
 
     if (
         ext == ".docx"
@@ -534,7 +620,19 @@ def extract_from_file(path: str, mime_type: str | None, max_chars: int, max_docu
     ):
         docx_text = _extract_docx_preview(file_path, max_document_pages=max_document_pages)
         docx_text = f"[Preview prime ~{max(1, max_document_pages)} pagine DOCX]\n{docx_text}"
-        return {"text": _truncate(docx_text, max_chars), "language": None}
+        author = ""
+        try:
+            from docx import Document  # type: ignore
+
+            document = Document(str(file_path))
+            author = _sanitize_author_candidate(document.core_properties.author)
+            if not author:
+                author = _sanitize_author_candidate(document.core_properties.last_modified_by)
+        except Exception:  # noqa: BLE001
+            author = ""
+        if not author:
+            author = _extract_office_core_author(file_path)
+        return {"text": _truncate(docx_text, max_chars), "language": None, "author": author or None}
 
     if ext == ".doc" or mime == "application/msword":
         doc_text = _extract_doc_preview(file_path, max_document_pages=max_document_pages)
@@ -542,6 +640,7 @@ def extract_from_file(path: str, mime_type: str | None, max_chars: int, max_docu
         return {
             "text": _truncate(doc_text, max_chars),
             "language": None,
+            "author": None,
         }
 
     if (
@@ -553,12 +652,16 @@ def extract_from_file(path: str, mime_type: str | None, max_chars: int, max_docu
     ):
         pptx_text = _extract_pptx_preview(file_path, max_document_pages=max_document_pages)
         pptx_text = f"[Preview prime ~{max(1, max_document_pages)} slide PPTX]\n{pptx_text}"
-        return {"text": _truncate(pptx_text, max_chars), "language": None}
+        return {
+            "text": _truncate(pptx_text, max_chars),
+            "language": None,
+            "author": _extract_office_core_author(file_path) or None,
+        }
 
     if ext == ".ppt" or mime in {"application/vnd.ms-powerpoint"}:
         ppt_text = _extract_legacy_binary_preview(file_path, max_document_pages=max_document_pages)
         ppt_text = f"[Preview contenuto PPT legacy]\n{ppt_text}"
-        return {"text": _truncate(ppt_text, max_chars), "language": None}
+        return {"text": _truncate(ppt_text, max_chars), "language": None, "author": None}
 
     if (
         ext == ".xlsx"
@@ -569,28 +672,34 @@ def extract_from_file(path: str, mime_type: str | None, max_chars: int, max_docu
     ):
         xlsx_text = _extract_xlsx_preview(file_path, max_document_pages=max_document_pages)
         xlsx_text = f"[Preview prime ~{max(1, max_document_pages)} sheet XLSX]\n{xlsx_text}"
-        return {"text": _truncate(xlsx_text, max_chars), "language": None}
+        return {
+            "text": _truncate(xlsx_text, max_chars),
+            "language": None,
+            "author": _extract_office_core_author(file_path) or None,
+        }
 
     if ext == ".xls" or mime in {"application/vnd.ms-excel", "application/msexcel"}:
         xls_text = _extract_legacy_binary_preview(file_path, max_document_pages=max_document_pages)
         xls_text = f"[Preview contenuto XLS legacy]\n{xls_text}"
-        return {"text": _truncate(xls_text, max_chars), "language": None}
+        return {"text": _truncate(xls_text, max_chars), "language": None, "author": None}
 
     if mime.startswith("audio/"):
         return {
             "text": f"Audio file: {file_path.name}. MIME: {mime_type}. Trascrizione non disponibile in questa prima versione.",
             "language": None,
+            "author": None,
         }
 
     if mime.startswith("video/"):
         return {
             "text": f"Video file: {file_path.name}. MIME: {mime_type}. Trascrizione non disponibile in questa prima versione.",
             "language": None,
+            "author": None,
         }
 
     if mime.startswith("text/") or ext in _TEXT_EXTENSIONS:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
-        return {"text": _truncate(content, max_chars), "language": None}
+        return {"text": _truncate(content, max_chars), "language": None, "author": None}
 
     binary = file_path.read_bytes()
     try:
@@ -598,4 +707,4 @@ def extract_from_file(path: str, mime_type: str | None, max_chars: int, max_docu
     except Exception:  # noqa: BLE001
         content = f"Binary file {file_path.name} ({mime_type or 'unknown'})"
 
-    return {"text": _truncate(content, max_chars), "language": None}
+    return {"text": _truncate(content, max_chars), "language": None, "author": None}

@@ -24,6 +24,38 @@ def slugify_theme(theme: str | None) -> str:
     return slug or "uncategorized"
 
 
+def source_macro_bucket(source_type: str | None) -> str:
+    value = (source_type or "").strip().lower()
+    if value == "link":
+        return "link"
+    if value == "file":
+        return "doc"
+    return slugify_theme(value or "doc")
+
+
+def detail_macro_bucket(resource: Resource) -> str:
+    labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+    detail_value = (
+        resource.inferred_subtheme
+        or labels.get("dettaglio_contenuto")
+        or labels.get("detail")
+        or "generale"
+    )
+    return slugify_theme(str(detail_value))
+
+
+def author_macro_bucket(resource: Resource) -> str:
+    labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+    author_value = (
+        resource.author_name
+        or labels.get("author")
+        or labels.get("autore")
+        or labels.get("youtube_channel")
+        or "sconosciuto"
+    )
+    return slugify_theme(str(author_value))
+
+
 def save_file_bytes(data: bytes, filename: str, files_root: Path) -> dict[str, str | int]:
     now = datetime.now(timezone.utc)
     bucket = files_root / str(now.year) / f"{now.month:02d}"
@@ -44,12 +76,15 @@ def save_file_bytes(data: bytes, filename: str, files_root: Path) -> dict[str, s
 
 def _write_link_note(resource: Resource, theme_dir: Path) -> Path:
     note_path = theme_dir / f"{resource.id}.md"
+    labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
     content = {
         "id": resource.id,
         "title": resource.title,
+        "document_type": labels.get("tipologia_documento"),
         "canonical_theme": resource.canonical_theme,
         "theme": resource.inferred_theme,
         "subtheme": resource.inferred_subtheme,
+        "author": resource.author_name,
         "keywords": resource.keywords,
         "summary": resource.summary,
         "source_url": resource.source_url,
@@ -62,9 +97,11 @@ def _write_link_note(resource: Resource, theme_dir: Path) -> Path:
         [
             f"# {resource.title}",
             "",
+            f"- Document Type: **{labels.get('tipologia_documento') or 'N/A'}**",
             f"- Canonical Theme: **{resource.canonical_theme or resource.inferred_theme}**",
             f"- Theme: **{resource.inferred_theme}**",
             f"- Subtheme: {resource.inferred_subtheme or 'N/A'}",
+            f"- Author: {resource.author_name or labels.get('author') or 'N/A'}",
             f"- Source URL: {resource.source_url or 'N/A'}",
             f"- Uploaded: {resource.uploaded_at.isoformat() if resource.uploaded_at else 'N/A'}",
             "",
@@ -83,8 +120,12 @@ def _write_link_note(resource: Resource, theme_dir: Path) -> Path:
 
 
 def save_in_thematic_folder(resource: Resource, themes_root: Path) -> str:
-    theme_slug = slugify_theme(resource.canonical_theme or resource.inferred_theme)
-    theme_dir = themes_root / theme_slug
+    source_bucket = source_macro_bucket(resource.source_type)
+    content_bucket = slugify_theme(resource.canonical_theme or resource.inferred_theme)
+    author_bucket = author_macro_bucket(resource)
+    detail_bucket = detail_macro_bucket(resource)
+
+    theme_dir = themes_root / source_bucket / content_bucket / author_bucket / detail_bucket
     theme_dir.mkdir(parents=True, exist_ok=True)
 
     if resource.stored_path:
@@ -96,10 +137,13 @@ def save_in_thematic_folder(resource: Resource, themes_root: Path) -> str:
                     target.symlink_to(source_path.resolve())
                 except OSError:
                     shutil.copy2(source_path, target)
+            _cleanup_previous_thematic_path(resource, target, themes_root)
             # Keep thematic path anchored to the theme folder for UI navigation.
             return str(target.absolute())
 
-    return str(_write_link_note(resource, theme_dir).absolute())
+    note = _write_link_note(resource, theme_dir)
+    _cleanup_previous_thematic_path(resource, note, themes_root)
+    return str(note.absolute())
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -118,6 +162,22 @@ def _safe_unlink(path: Path) -> bool:
     except Exception:  # noqa: BLE001
         return False
     return False
+
+
+def _cleanup_previous_thematic_path(resource: Resource, current_target: Path, themes_root: Path) -> None:
+    previous = Path(resource.thematic_path) if resource.thematic_path else None
+    if not previous:
+        return
+    if not _is_within(previous, themes_root):
+        return
+    try:
+        if previous.resolve() == current_target.resolve():
+            return
+    except Exception:  # noqa: BLE001
+        if str(previous.absolute()) == str(current_target.absolute()):
+            return
+    if _safe_unlink(previous):
+        _prune_empty_parents(previous.parent, themes_root)
 
 
 def _prune_empty_parents(start: Path, stop: Path) -> None:

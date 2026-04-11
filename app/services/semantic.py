@@ -24,6 +24,22 @@ CANONICAL_TOPICS: dict[str, list[str]] = {
         "probabilita",
         "linear algebra",
     ],
+    "Fisica e Scienze": [
+        "fisica",
+        "physics",
+        "relativity",
+        "relativita",
+        "relatività",
+        "einstein",
+        "space-time",
+        "spacetime",
+        "quantum",
+        "meccanica quantistica",
+        "quantistica",
+        "cosmologia",
+        "astrofisica",
+        "termodinamica",
+    ],
     "AI e Machine Learning": [
         "ai",
         "artificial intelligence",
@@ -377,6 +393,9 @@ class SemanticSearchService:
             if query in {"natura", "nature", "wildlife", "ambiente", "landscape"}:
                 target = ["Natura e Ambiente"]
                 related.extend(CANONICAL_TOPICS["Natura e Ambiente"])
+            if query in {"fisica", "physics", "relativita", "relatività", "quantum", "einstein", "scienza"}:
+                target = ["Fisica e Scienze"]
+                related.extend(CANONICAL_TOPICS["Fisica e Scienze"])
 
         return QueryExpansion(
             normalized_query=query,
@@ -396,6 +415,8 @@ def score_resource_for_query(resource, *, terms: list[str], target_themes: list[
     canonical_theme = _normalize_token(getattr(resource, "canonical_theme", "") or "")
     subtheme = _normalize_token(resource.inferred_subtheme or "")
     keywords = _normalize_token(" ".join(getattr(resource, "keywords", []) or []))
+    llm_labels = _normalize_token(json.dumps(getattr(resource, "llm_labels", {}) or {}, ensure_ascii=False))
+    llm_raw = _normalize_token(json.dumps(getattr(resource, "llm_raw", {}) or {}, ensure_ascii=False))
 
     score = (resource.combined_score or 0.0) * 2.4
     score += (resource.relevance_score or 0.0) * 1.2
@@ -415,7 +436,11 @@ def score_resource_for_query(resource, *, terms: list[str], target_themes: list[
         if term in description or term in summary:
             score += 1.0
         if term in content_text:
-            score += 0.8
+            score += 1.35
+        if term in llm_labels:
+            score += 1.1
+        if term in llm_raw:
+            score += 0.55
         if term in source_url:
             score += 0.35
 

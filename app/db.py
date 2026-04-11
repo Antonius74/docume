@@ -39,6 +39,8 @@ def _ensure_runtime_schema_updates() -> None:
         statements.append("ALTER TABLE resources ADD COLUMN content_text TEXT")
     if "canonical_theme" not in columns:
         statements.append("ALTER TABLE resources ADD COLUMN canonical_theme VARCHAR(120)")
+    if "author_name" not in columns:
+        statements.append("ALTER TABLE resources ADD COLUMN author_name VARCHAR(160)")
 
     with engine.begin() as conn:
         for statement in statements:
@@ -62,4 +64,14 @@ def _ensure_runtime_schema_updates() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                UPDATE resources
+                SET author_name = NULLIF(TRIM(author_name), '')
+                WHERE author_name IS NOT NULL
+                """
+            )
+        )
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_resources_canonical_theme ON resources (canonical_theme)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_resources_author_name ON resources (author_name)"))

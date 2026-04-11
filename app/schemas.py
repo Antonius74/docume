@@ -23,6 +23,7 @@ class ResourceOut(BaseModel):
     mime_type: str | None
     size_bytes: int | None
     language: str | None
+    author_name: str | None
     canonical_theme: str | None
     inferred_theme: str
     inferred_subtheme: str | None
@@ -45,3 +46,25 @@ class ResourceListOut(BaseModel):
 class ThemeStatOut(BaseModel):
     theme: str
     count: int
+
+
+class AuthorStatOut(BaseModel):
+    author: str
+    count: int
+
+
+class DetailNodeOut(BaseModel):
+    detail: str
+    count: int
+
+
+class AuthorTreeNodeOut(BaseModel):
+    author: str
+    count: int
+    details: list[DetailNodeOut]
+
+
+class ThemeTreeNodeOut(BaseModel):
+    theme: str
+    count: int
+    authors: list[AuthorTreeNodeOut]

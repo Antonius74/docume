@@ -13,14 +13,14 @@ class Settings(BaseSettings):
 
     app_name: str = "Knowledge Classifier"
     app_env: str = "development"
-    database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/nexi_pay"
+    database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/docume"
     ollama_url: str = "http://localhost:11434"
     # Legacy fallback (kept for backward compatibility)
-    ollama_model: str = "gpt-oss:120b"
+    ollama_model: str = "gpt-oss:120b-cloud"
     # Requested split models:
     # - text/link/document classification -> GPT 120 family
     # - image classification -> Kimi multimodal
-    ollama_model_text: str = "gpt-oss:120b"
+    ollama_model_text: str = "gpt-oss:120b-cloud"
     ollama_model_image: str = "kimi-k2.5:cloud"
     storage_root: Path = Path("./storage")
     max_extract_chars: int = 12000
@@ -33,7 +33,7 @@ class Settings(BaseSettings):
         candidate = (self.ollama_model_text or "").strip()
         if candidate:
             return candidate
-        return (self.ollama_model or "gpt-oss:120b").strip()
+        return (self.ollama_model or "gpt-oss:120b-cloud").strip()
 
     @property
     def resolved_ollama_model_image(self) -> str:
@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     @property
     def themes_root(self) -> Path:
         return self.storage_root / "themes"
+
+    @property
+    def categories_catalog_path(self) -> Path:
+        return self.storage_root / "categories_catalog.json"
 
     def ensure_storage_paths(self) -> None:
         self.storage_root.mkdir(parents=True, exist_ok=True)

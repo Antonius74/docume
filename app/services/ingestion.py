@@ -1,4 +1,5 @@
 import hashlib
+import re
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse, urlunparse
 from uuid import uuid4
@@ -24,6 +25,24 @@ class IngestionService:
         db.commit()
         db.refresh(resource)
         return resource
+
+    def _sanitize_text(self, value: str | None, *, max_len: int | None = None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).replace("\x00", " ")
+        cleaned = re.sub(r"[\x01-\x08\x0B\x0C\x0E-\x1F]+", " ", cleaned)
+        if max_len and max_len > 0:
+            cleaned = cleaned[:max_len]
+        return cleaned
+
+    def _sanitize_json_like(self, value):
+        if isinstance(value, dict):
+            return {str(self._sanitize_text(str(k))): self._sanitize_json_like(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._sanitize_json_like(item) for item in value]
+        if isinstance(value, str):
+            return self._sanitize_text(value)
+        return value
 
     def _youtube_id(self, url: str) -> str | None:
         parsed = urlparse(url)
@@ -79,26 +98,68 @@ class IngestionService:
             max_chars=self.settings.max_extract_chars,
         )
 
-        inferred_title = title or extracted.get("title") or url
-        extracted_text = extracted.get("text") or ""
-        extracted_description = description or extracted.get("description")
-        source_name = extracted.get("site_name") or urlparse(normalized_url).netloc or inferred_title
+        inferred_title = self._sanitize_text(title or extracted.get("title") or url, max_len=500) or url
+        extracted_text = self._sanitize_text(extracted.get("text") or "", max_len=self.settings.max_extract_chars) or ""
+        extracted_description = self._sanitize_text(description or extracted.get("description"))
+        source_name = self._sanitize_text(
+            extracted.get("site_name") or urlparse(normalized_url).netloc or inferred_title,
+            max_len=500,
+        )
+        searchable_text = self._sanitize_text(
+            extracted_text
+            or " ".join(part for part in [inferred_title, extracted_description or "", normalized_url] if part),
+            max_len=self.settings.max_extract_chars,
+        )
+        author_name = self._sanitize_text(extracted.get("author"), max_len=160)
+        if not author_name:
+            author_name = await self.classifier.infer_author_name(
+                source_type="link",
+                title=inferred_title,
+                description=extracted_description,
+                extracted_text=searchable_text or "",
+                source_url=normalized_url,
+                source_name=source_name,
+                metadata_hints={
+                    "author": extracted.get("author"),
+                    "youtube_channel": extracted.get("youtube_channel"),
+                    "site_name": extracted.get("site_name"),
+                    "domain": extracted.get("domain"),
+                    "section": extracted.get("section"),
+                },
+            )
+            author_name = self._sanitize_text(author_name, max_len=160)
+        if not author_name:
+            author_name = self._sanitize_text(source_name, max_len=160)
         now_utc = datetime.now(timezone.utc)
 
         classification = await self.classifier.classify(
             source_type="link",
             title=inferred_title,
             description=extracted_description,
-            extracted_text=extracted_text,
+            extracted_text=searchable_text or "",
             mime_type="text/html",
             source_url=url,
             source_name=source_name,
         )
 
+        safe_keywords = self._sanitize_json_like(classification.keywords) or []
+        safe_llm_labels = self._sanitize_json_like(
+            {
+                "fallback_used": classification.fallback_used,
+                "model": classification.model_used,
+                "classification_source": "llm-content-v3-3fields",
+                "tipologia_documento": classification.document_type,
+                "contenuto": classification.theme,
+                "dettaglio_contenuto": classification.subtheme,
+                "author": author_name,
+            }
+        )
+        safe_llm_raw = self._sanitize_json_like(classification.raw)
+
         resource = Resource(
             id=str(uuid4()),
             source_type="link",
-            title=classification.title,
+            title=self._sanitize_text(classification.title, max_len=500) or inferred_title,
             description=extracted_description,
             source_url=normalized_url,
             youtube_video_id=extracted.get("youtube_video_id") or youtube_id,
@@ -106,21 +167,18 @@ class IngestionService:
             size_bytes=None,
             sha256=None,
             language=classification.language,
-            inferred_theme=classification.theme,
-            inferred_subtheme=classification.subtheme,
-            canonical_theme=classification.canonical_theme,
-            keywords=classification.keywords,
-            summary=classification.summary,
-            content_text=extracted_text,
+            author_name=author_name,
+            inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
+            inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
+            canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),
+            keywords=safe_keywords,
+            summary=self._sanitize_text(classification.summary, max_len=1200),
+            content_text=searchable_text,
             relevance_score=classification.relevance_score,
             conceptual_score=classification.conceptual_score,
             combined_score=classification.combined_score,
-            llm_labels={
-                "fallback_used": classification.fallback_used,
-                "model": classification.model_used,
-                "classification_source": "llm-content-v2",
-            },
-            llm_raw=classification.raw,
+            llm_labels=safe_llm_labels,
+            llm_raw=safe_llm_raw,
             status="processed",
             uploaded_at=now_utc,
             processed_at=now_utc,
@@ -161,26 +219,61 @@ class IngestionService:
             max_document_pages=self.settings.max_document_pages,
         )
 
-        inferred_title = title or filename
-        extracted_text = extracted.get("text") or ""
+        inferred_title = self._sanitize_text(title or filename, max_len=500) or filename
+        extracted_text = self._sanitize_text(extracted.get("text") or "", max_len=self.settings.max_extract_chars) or ""
+        sanitized_description = self._sanitize_text(description)
+        searchable_text = self._sanitize_text(
+            extracted_text or " ".join(part for part in [inferred_title, sanitized_description or ""] if part),
+            max_len=self.settings.max_extract_chars,
+        )
+        author_name = self._sanitize_text(extracted.get("author"), max_len=160)
+        if not author_name:
+            author_name = await self.classifier.infer_author_name(
+                source_type="file",
+                title=inferred_title,
+                description=sanitized_description,
+                extracted_text=searchable_text or "",
+                source_url=None,
+                source_name=filename,
+                metadata_hints={
+                    "author": extracted.get("author"),
+                    "filename": filename,
+                    "mime_type": mime_type,
+                },
+            )
+            author_name = self._sanitize_text(author_name, max_len=160)
         now_utc = datetime.now(timezone.utc)
 
         classification = await self.classifier.classify(
             source_type="file",
             title=inferred_title,
-            description=description,
-            extracted_text=extracted_text,
+            description=sanitized_description,
+            extracted_text=searchable_text or "",
             mime_type=mime_type,
             source_url=None,
             source_name=filename,
             image_b64=extracted.get("image_b64"),
         )
 
+        safe_keywords = self._sanitize_json_like(classification.keywords) or []
+        safe_llm_labels = self._sanitize_json_like(
+            {
+                "fallback_used": classification.fallback_used,
+                "model": classification.model_used,
+                "classification_source": "llm-content-v3-3fields",
+                "tipologia_documento": classification.document_type,
+                "contenuto": classification.theme,
+                "dettaglio_contenuto": classification.subtheme,
+                "author": author_name,
+            }
+        )
+        safe_llm_raw = self._sanitize_json_like(classification.raw)
+
         resource = Resource(
             id=str(uuid4()),
             source_type="file",
-            title=classification.title,
-            description=description,
+            title=self._sanitize_text(classification.title, max_len=500) or inferred_title,
+            description=sanitized_description,
             source_url=None,
             youtube_video_id=None,
             stored_path=saved["stored_path"],
@@ -188,21 +281,18 @@ class IngestionService:
             size_bytes=saved["size_bytes"],
             sha256=saved["sha256"],
             language=classification.language,
-            inferred_theme=classification.theme,
-            inferred_subtheme=classification.subtheme,
-            canonical_theme=classification.canonical_theme,
-            keywords=classification.keywords,
-            summary=classification.summary,
-            content_text=extracted_text,
+            author_name=author_name,
+            inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
+            inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
+            canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),
+            keywords=safe_keywords,
+            summary=self._sanitize_text(classification.summary, max_len=1200),
+            content_text=searchable_text,
             relevance_score=classification.relevance_score,
             conceptual_score=classification.conceptual_score,
             combined_score=classification.combined_score,
-            llm_labels={
-                "fallback_used": classification.fallback_used,
-                "model": classification.model_used,
-                "classification_source": "llm-content-v2",
-            },
-            llm_raw=classification.raw,
+            llm_labels=safe_llm_labels,
+            llm_raw=safe_llm_raw,
             status="processed",
             uploaded_at=now_utc,
             processed_at=now_utc,

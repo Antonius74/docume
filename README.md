@@ -4,7 +4,7 @@ Prima versione di una piattaforma che:
 
 - riceve upload di file (`pdf`, testo, immagini, audio, video) e link (inclusi YouTube)
 - usa Ollama con modelli separati:
-  - `gpt-oss:120b` per link/siti e documenti testuali (`pdf`, `doc`, `docx`, `ppt`, `pptx`, `xls`, `xlsx`)
+  - `gpt-oss:120b-cloud` per link/siti e documenti testuali (`pdf`, `doc`, `docx`, `ppt`, `pptx`, `xls`, `xlsx`)
   - `kimi-k2.5:cloud` per immagini (classificazione visuale)
 - salva file su filesystem e metadati/classificazione su PostgreSQL
 - organizza contenuti in cartelle tematiche
@@ -44,7 +44,7 @@ cp .env.example .env
 ```
 
 Il progetto usa di default:
-`postgresql+psycopg://postgres:postgres@127.0.0.1:5432/nexi_pay`
+`postgresql+psycopg://postgres:postgres@127.0.0.1:5432/docume`
 
 `MAX_DOCUMENT_PAGES=10` limita l'estrazione documentale alle prime pagine/sheet/slide (`PDF/DOC/DOCX/PPT/PPTX/XLS/XLSX`) per ingest più veloce.  
 Puoi impostarlo a `5` o `10` in base al trade-off velocità/accuratezza.
@@ -52,7 +52,7 @@ Puoi impostarlo a `5` o `10` in base al trade-off velocità/accuratezza.
 4. Avvia Ollama e i modelli (adatta i nomi se nel tuo catalogo sono diversi):
 
 ```bash
-ollama pull gpt-oss:120b
+ollama pull gpt-oss:120b-cloud
 ollama pull kimi-k2.5:cloud
 ```
 

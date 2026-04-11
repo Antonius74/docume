@@ -268,7 +268,7 @@ textarea {
 
 .explorer-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr) minmax(180px, 1fr);
+  grid-template-columns: minmax(0, 2fr) minmax(160px, 1fr) minmax(190px, 1fr) minmax(160px, 1fr);
   gap: 0.55rem;
   align-items: start;
   align-content: start;
@@ -387,7 +387,7 @@ textarea {
   gap: 0.55rem;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   align-items: stretch;
-  grid-auto-rows: 145px;
+  grid-auto-rows: 160px;
 }
 
 .card {
@@ -434,8 +434,51 @@ textarea {
 }
 
 .badge.type {
-  color: #2a1b00;
-  background: var(--accent);
+  color: #e8f5ff;
+  background: rgba(159, 216, 255, 0.2);
+  border: 1px solid rgba(159, 216, 255, 0.4);
+}
+
+.badge.type.source-yt {
+  color: #3d0707;
+  background: #ff8d8d;
+  border-color: rgba(255, 141, 141, 0.6);
+}
+
+.badge.type.source-web {
+  color: #132d46;
+  background: #8dd0ff;
+  border-color: rgba(141, 208, 255, 0.65);
+}
+
+.badge.type.source-doc {
+  color: #342300;
+  background: #f8b04d;
+  border-color: rgba(248, 176, 77, 0.66);
+}
+
+.badge.type.source-image {
+  color: #0f3d36;
+  background: #7ce8c7;
+  border-color: rgba(124, 232, 199, 0.64);
+}
+
+.badge.type.source-audio {
+  color: #2f2066;
+  background: #c3b0ff;
+  border-color: rgba(195, 176, 255, 0.64);
+}
+
+.badge.type.source-video {
+  color: #613216;
+  background: #ffb78c;
+  border-color: rgba(255, 183, 140, 0.64);
+}
+
+.badge.author {
+  color: #16311f;
+  background: #95e8b9;
+  border: 1px solid rgba(149, 232, 185, 0.65);
 }
 
 .title {
@@ -444,9 +487,41 @@ textarea {
   line-height: 1.25;
   overflow-wrap: anywhere;
   display: -webkit-box;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.title-row .title {
+  flex: 1;
+  min-width: 0;
+}
+
+.info-btn {
+  border: 1px solid rgba(159, 216, 255, 0.45);
+  background: rgba(159, 216, 255, 0.12);
+  color: #cfe9ff;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  line-height: 1;
+  font-weight: 700;
+  padding: 0;
+  cursor: help;
+  flex: 0 0 auto;
+}
+
+.info-btn:hover {
+  border-color: rgba(159, 216, 255, 0.7);
+  background: rgba(159, 216, 255, 0.2);
 }
 
 .summary {
@@ -454,11 +529,21 @@ textarea {
   color: var(--muted);
   font-size: 0.8rem;
   line-height: 1.2;
+  min-height: 2.4em;
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.author-line {
+  margin: 0;
+  font-size: 0.73rem;
+  color: #b7d1e7;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .helper-text {
   font-size: 0.78rem;
@@ -494,18 +579,18 @@ textarea {
   text-decoration: underline;
 }
 
-.actions .action-delete {
-  border: 1px solid rgba(241, 118, 118, 0.42);
-  background: rgba(241, 118, 118, 0.12);
-  color: #ffc7c7;
-  border-radius: 8px;
-  padding: 0.15rem 0.45rem;
-  font-size: 0.74rem;
+.actions .action-delete-link {
+  border: none;
+  background: transparent;
+  color: #ff8f8f;
+  text-decoration: none;
+  font-size: 0.76rem;
+  padding: 0;
   cursor: pointer;
 }
 
-.actions .action-delete:hover {
-  background: rgba(241, 118, 118, 0.2);
+.actions .action-delete-link:hover {
+  text-decoration: underline;
 }
 
 .helper-card {

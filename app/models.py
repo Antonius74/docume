@@ -22,6 +22,7 @@ class Resource(Base):
     sha256 = Column(String(64), nullable=True, index=True)
 
     language = Column(String(32), nullable=True)
+    author_name = Column(String(160), nullable=True, index=True)
     inferred_theme = Column(String(120), nullable=False, default="Uncategorized", index=True)
     inferred_subtheme = Column(String(120), nullable=True, index=True)
     canonical_theme = Column(String(120), nullable=True, index=True)
