@@ -197,13 +197,25 @@ function renderFolderList() {
     const branch = document.createElement("div");
     branch.className = "folder-branch";
 
+    const buildFolderContent = (label, countValue) => {
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "folder-name";
+      nameSpan.textContent = label;
+      const countSpan = document.createElement("span");
+      countSpan.className = "folder-count";
+      countSpan.textContent = String(countValue || 0);
+      return [nameSpan, countSpan];
+    };
+
     const themeBtn = document.createElement("button");
     themeBtn.type = "button";
     themeBtn.className = "folder-item level-theme";
     if (state.selectedTheme === themeNode.theme && !state.selectedAuthor && !state.selectedDetail) {
       themeBtn.classList.add("active");
     }
-    themeBtn.innerHTML = `<span class="folder-name">${themeNode.theme}</span><span class="folder-count">${themeNode.count}</span>`;
+    for (const node of buildFolderContent(themeNode.theme, themeNode.count)) {
+      themeBtn.appendChild(node);
+    }
     themeBtn.addEventListener("click", () => {
       state.selectedTheme = themeNode.theme;
       state.selectedAuthor = "";
@@ -227,7 +239,9 @@ function renderFolderList() {
       ) {
         authorBtn.classList.add("active");
       }
-      authorBtn.innerHTML = `<span class="folder-name">${authorNode.author}</span><span class="folder-count">${authorNode.count}</span>`;
+      for (const node of buildFolderContent(authorNode.author, authorNode.count)) {
+        authorBtn.appendChild(node);
+      }
       authorBtn.addEventListener("click", () => {
         state.selectedTheme = themeNode.theme;
         state.selectedAuthor = authorNode.author;
@@ -251,7 +265,9 @@ function renderFolderList() {
         ) {
           detailBtn.classList.add("active");
         }
-        detailBtn.innerHTML = `<span class="folder-name">${detailNode.detail}</span><span class="folder-count">${detailNode.count}</span>`;
+        for (const node of buildFolderContent(detailNode.detail, detailNode.count)) {
+          detailBtn.appendChild(node);
+        }
         detailBtn.addEventListener("click", () => {
           state.selectedTheme = themeNode.theme;
           state.selectedAuthor = authorNode.author;
@@ -278,6 +294,11 @@ function renderFolderHeader() {
   const hasQuery = elements.searchInput.value.trim().length > 0;
 
   if (!state.selectedTheme) {
+    if (state.selectedAuthor) {
+      elements.selectedFolderTitle.textContent = "Filtro per autore";
+      elements.selectedFolderMeta.textContent = `Autore selezionato: ${state.selectedAuthor}`;
+      return;
+    }
     if (hasQuery) {
       elements.selectedFolderTitle.textContent = "Ricerca globale";
       elements.selectedFolderMeta.textContent = "Risultati dal database su tutti i contenuti.";
@@ -511,7 +532,7 @@ async function loadResources() {
   renderFolderHeader();
   const hasQuery = elements.searchInput.value.trim().length > 0;
 
-  if (!state.selectedTheme && !hasQuery) {
+  if (!state.selectedTheme && !state.selectedAuthor && !state.selectedDetail && !hasQuery) {
     renderEmptyFilesState("Seleziona una cartella per visualizzare i file.");
     return;
   }
@@ -687,14 +708,22 @@ elements.refreshBtn.addEventListener("click", () => {
 elements.clearFolderBtn.addEventListener("click", () => {
   state.selectedTheme = "";
   state.selectedAuthor = "";
+  state.selectedDetail = "";
   renderFolderList();
   Promise.all([loadAuthors(), loadResources()]).catch((err) => setStatus(err.message, true));
 });
 
 elements.searchInput.addEventListener("input", debouncedSearch);
-elements.sourceSelect.addEventListener("change", debouncedSearch);
+elements.sourceSelect.addEventListener("change", () => {
+  state.page = 1;
+  Promise.all([loadThemes(), loadAuthors(), loadResources()]).catch((err) => setStatus(err.message, true));
+});
 elements.authorSelect.addEventListener("change", () => {
+  state.page = 1;
   state.selectedAuthor = elements.authorSelect.value;
+  state.selectedDetail = "";
+  renderFolderList();
+  renderFolderHeader();
   debouncedSearch();
 });
 elements.sortSelect.addEventListener("change", debouncedSearch);

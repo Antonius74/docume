@@ -381,13 +381,54 @@ textarea {
   font-size: 0.72rem;
 }
 
+.folder-branch {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.folder-children {
+  display: grid;
+  gap: 0.35rem;
+  margin-left: 0.55rem;
+  padding-left: 0.45rem;
+  border-left: 1px solid rgba(121, 183, 255, 0.22);
+}
+
+.folder-children.details {
+  margin-left: 0.8rem;
+  border-left-color: rgba(58, 211, 166, 0.22);
+}
+
+.folder-item.level-theme .folder-name {
+  font-size: 0.98rem;
+}
+
+.folder-item.level-author {
+  background: rgba(16, 30, 46, 0.76);
+}
+
+.folder-item.level-author .folder-name {
+  font-size: 0.9rem;
+  font-weight: 620;
+}
+
+.folder-item.level-detail {
+  background: rgba(11, 24, 38, 0.84);
+  padding: 0.42rem 0.56rem;
+}
+
+.folder-item.level-detail .folder-name {
+  font-size: 0.82rem;
+  font-weight: 540;
+}
+
 .result-list {
   margin-top: 0.7rem;
   display: grid;
   gap: 0.55rem;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   align-items: stretch;
-  grid-auto-rows: 160px;
+  grid-auto-rows: 190px;
 }
 
 .card {
@@ -396,8 +437,8 @@ textarea {
   padding: 0.55rem;
   background: rgba(7, 18, 30, 0.75);
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
-  gap: 0.35rem;
+  grid-template-rows: auto auto auto auto auto;
+  gap: 0.28rem;
   align-content: start;
   height: 100%;
   min-height: 0;
@@ -540,6 +581,7 @@ textarea {
 .author-line {
   margin: 0;
   font-size: 0.73rem;
+  line-height: 1.15;
   color: #b7d1e7;
   overflow: hidden;
   white-space: nowrap;

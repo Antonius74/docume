@@ -300,7 +300,24 @@ def _sanitize_author_candidate(value: object) -> str:
         cleaned = cleaned[:160].rstrip(" .,:;|-")
 
     lowered = cleaned.lower()
-    if lowered in {"unknown", "sconosciuto", "n/a", "na", "none", "null", "staff", "team"}:
+    blocked = {
+        "unknown",
+        "sconosciuto",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "staff",
+        "team",
+        "youtube",
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+    }
+    normalized = lowered.removeprefix("www.")
+    if lowered in blocked or normalized in blocked:
         return ""
     return cleaned
 
@@ -340,6 +357,36 @@ def _extract_office_core_author(file_path: Path) -> str:
             value = _sanitize_author_candidate(node.text)
             if value:
                 return value
+    return ""
+
+
+def _decode_json_escaped_text(value: str) -> str:
+    candidate = str(value or "")
+    if not candidate:
+        return ""
+    try:
+        return json.loads(f"\"{candidate}\"")
+    except Exception:  # noqa: BLE001
+        return candidate.replace("\\u0026", "&").replace("\\/", "/")
+
+
+def _extract_youtube_channel_from_html(html: str) -> str:
+    if not html:
+        return ""
+    patterns = [
+        r'"ownerChannelName":"([^"]{2,160})"',
+        r'"author":"([^"]{2,160})"',
+        r'"channelName":"([^"]{2,160})"',
+        r'"ownerChannelTitle":"([^"]{2,160})"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if not match:
+            continue
+        decoded = _decode_json_escaped_text(match.group(1))
+        candidate = _sanitize_author_candidate(decoded)
+        if candidate:
+            return candidate
     return ""
 
 
@@ -493,6 +540,11 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                     keywords.extend(_split_keywords(item.get("keywords")))
 
                 if video_id:
+                    if not youtube_channel:
+                        youtube_channel = _extract_youtube_channel_from_html(body)
+                    if youtube_channel and not author_name:
+                        author_name = _sanitize_author_candidate(youtube_channel)
+
                     # YouTube oEmbed gives reliable title/channel without requiring full DOM execution.
                     try:
                         oembed = await client.get(
@@ -504,7 +556,7 @@ async def extract_from_link(url: str, timeout_seconds: int, max_chars: int) -> d
                             if payload.get("title"):
                                 title = str(payload["title"]).strip()
                             if payload.get("author_name"):
-                                youtube_channel = str(payload["author_name"]).strip()
+                                youtube_channel = _sanitize_author_candidate(payload.get("author_name")) or youtube_channel
                                 if not author_name:
                                     author_name = _sanitize_author_candidate(payload.get("author_name"))
                             site_name = site_name or "YouTube"

@@ -102,6 +102,7 @@ async def _reclassify_existing_resources() -> None:
                 prefill_changed = True
 
             labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+            author_changed = False
             normalized_author = classifier._sanitize_author_name(resource.author_name) if resource.author_name else None
             if not normalized_author:
                 fallback_author = (
@@ -109,12 +110,22 @@ async def _reclassify_existing_resources() -> None:
                     or labels.get("youtube_channel")
                     or None
                 )
-                if not fallback_author and resource.source_type == "link" and resource.source_url:
+                is_youtube_link = False
+                if resource.source_type == "link" and resource.source_url:
+                    lowered_url = resource.source_url.lower()
+                    is_youtube_link = "youtube.com" in lowered_url or "youtu.be" in lowered_url
+                if (
+                    not fallback_author
+                    and resource.source_type == "link"
+                    and resource.source_url
+                    and not is_youtube_link
+                ):
                     fallback_author = (urlparse(resource.source_url).netloc or "").replace("www.", "")
                 normalized_author = classifier._sanitize_author_name(fallback_author) if fallback_author else None
             if resource.author_name != normalized_author:
                 resource.author_name = normalized_author
                 prefill_changed = True
+                author_changed = True
 
             # If the LLM inferred a specific theme but canonical theme is still
             # "General", align canonical taxonomy without waiting for full re-run.
@@ -142,6 +153,11 @@ async def _reclassify_existing_resources() -> None:
                 if len(segments) >= 5 and segments[0] in {"doc", "link"}:
                     has_macro_layout = True
             if not has_macro_layout:
+                refreshed_thematic_path = save_in_thematic_folder(resource, settings.themes_root)
+                if resource.thematic_path != refreshed_thematic_path:
+                    resource.thematic_path = refreshed_thematic_path
+                    prefill_changed = True
+            elif author_changed:
                 refreshed_thematic_path = save_in_thematic_folder(resource, settings.themes_root)
                 if resource.thematic_path != refreshed_thematic_path:
                     resource.thematic_path = refreshed_thematic_path

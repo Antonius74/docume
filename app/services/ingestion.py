@@ -105,12 +105,14 @@ class IngestionService:
             extracted.get("site_name") or urlparse(normalized_url).netloc or inferred_title,
             max_len=500,
         )
+        lowered_url = normalized_url.lower()
+        is_youtube_source = bool(youtube_id) or ("youtube.com" in lowered_url) or ("youtu.be" in lowered_url)
         searchable_text = self._sanitize_text(
             extracted_text
             or " ".join(part for part in [inferred_title, extracted_description or "", normalized_url] if part),
             max_len=self.settings.max_extract_chars,
         )
-        author_name = self._sanitize_text(extracted.get("author"), max_len=160)
+        author_name = self.classifier._sanitize_author_name(extracted.get("author"))
         if not author_name:
             author_name = await self.classifier.infer_author_name(
                 source_type="link",
@@ -127,9 +129,9 @@ class IngestionService:
                     "section": extracted.get("section"),
                 },
             )
-            author_name = self._sanitize_text(author_name, max_len=160)
-        if not author_name:
-            author_name = self._sanitize_text(source_name, max_len=160)
+            author_name = self.classifier._sanitize_author_name(author_name)
+        if not author_name and not is_youtube_source:
+            author_name = self.classifier._sanitize_author_name(source_name)
         now_utc = datetime.now(timezone.utc)
 
         classification = await self.classifier.classify(
@@ -226,7 +228,7 @@ class IngestionService:
             extracted_text or " ".join(part for part in [inferred_title, sanitized_description or ""] if part),
             max_len=self.settings.max_extract_chars,
         )
-        author_name = self._sanitize_text(extracted.get("author"), max_len=160)
+        author_name = self.classifier._sanitize_author_name(extracted.get("author"))
         if not author_name:
             author_name = await self.classifier.infer_author_name(
                 source_type="file",
@@ -241,7 +243,7 @@ class IngestionService:
                     "mime_type": mime_type,
                 },
             )
-            author_name = self._sanitize_text(author_name, max_len=160)
+            author_name = self.classifier._sanitize_author_name(author_name)
         now_utc = datetime.now(timezone.utc)
 
         classification = await self.classifier.classify(

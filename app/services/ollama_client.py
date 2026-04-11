@@ -643,8 +643,17 @@ class OllamaClassifier:
             "general",
             "no author",
             "non disponibile",
+            "youtube",
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+            "music.youtube.com",
+            "youtu.be",
         }
-        if lowered in blocked:
+        normalized = lowered.removeprefix("www.")
+        if lowered in blocked or normalized in blocked:
+            return None
+        if re.fullmatch(r"(?:https?://)?(?:www\.)?(?:youtube\.com|youtu\.be)(?:/.*)?", lowered):
             return None
         return candidate
 
