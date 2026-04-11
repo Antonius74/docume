@@ -322,13 +322,32 @@ async function loadThemeTree() {
     params.set("source_type", sourceType);
   }
   const suffix = params.toString();
-  const response = await fetch(`/api/theme-tree${suffix ? `?${suffix}` : ""}`);
-  if (!response.ok) {
-    throw new Error("Impossibile caricare le cartelle");
+  let treeLoaded = false;
+
+  try {
+    const response = await fetch(`/api/theme-tree${suffix ? `?${suffix}` : ""}`);
+    if (response.ok) {
+      state.themeTree = await response.json();
+      state.themes = (state.themeTree || []).map((node) => ({ theme: node.theme, count: node.count }));
+      treeLoaded = true;
+    }
+  } catch (_) {
+    treeLoaded = false;
   }
 
-  state.themeTree = await response.json();
-  state.themes = (state.themeTree || []).map((node) => ({ theme: node.theme, count: node.count }));
+  if (!treeLoaded) {
+    const fallback = await fetch("/api/themes");
+    if (!fallback.ok) {
+      throw new Error("Impossibile caricare le cartelle");
+    }
+    const legacyThemes = await fallback.json();
+    state.themes = legacyThemes || [];
+    state.themeTree = (legacyThemes || []).map((entry) => ({
+      theme: entry.theme,
+      count: entry.count,
+      authors: [],
+    }));
+  }
 
   if (state.selectedTheme && !state.themeTree.some((theme) => theme.theme === state.selectedTheme)) {
     state.selectedTheme = "";
