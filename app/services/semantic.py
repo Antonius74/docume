@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from app.services.text_similarity import similarity_profile, text_similarity_score
+
 
 CANONICAL_TOPICS: dict[str, list[str]] = {
     "Matematica e Statistica": [
@@ -264,6 +266,27 @@ class SemanticSearchService:
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: dict[str, tuple[float, QueryExpansion]] = {}
 
+    def _set_cache(self, key: str, value: QueryExpansion, now: float) -> None:
+        self._cache[key] = (now, value)
+        if len(self._cache) <= 600:
+            return
+        # Simple bounded cache: purge oldest 120 items.
+        oldest = sorted(self._cache.items(), key=lambda item: item[1][0])[:120]
+        for cache_key, _ in oldest:
+            self._cache.pop(cache_key, None)
+
+    def _should_use_llm(self, normalized_query: str, fallback: QueryExpansion) -> bool:
+        # Query brevi o a singola parola vanno veloci con fallback deterministico.
+        tokens = [token for token in normalized_query.split(" ") if token]
+        if len(normalized_query) < 8:
+            return False
+        if len(tokens) <= 1:
+            return False
+        # Se abbiamo già un buon mapping tema dal fallback, evitiamo roundtrip LLM.
+        if fallback.target_themes and len(tokens) <= 3:
+            return False
+        return True
+
     def expand_query(self, query: str, *, use_llm: bool = True) -> QueryExpansion:
         normalized_query = _normalize_token(query)
         if not normalized_query:
@@ -281,8 +304,10 @@ class SemanticSearchService:
         if direct_theme:
             fallback.target_themes = [direct_theme]
             use_llm = False
+        if use_llm and not self._should_use_llm(normalized_query, fallback):
+            use_llm = False
         if not use_llm:
-            self._cache[normalized_query] = (now, fallback)
+            self._set_cache(normalized_query, fallback, now)
             return fallback
 
         try:
@@ -297,12 +322,12 @@ class SemanticSearchService:
                 used_fallback=False,
                 raw=llm_result.raw,
             )
-            self._cache[normalized_query] = (now, output)
+            self._set_cache(normalized_query, output, now)
             return output
         except Exception as exc:  # noqa: BLE001
             fallback.used_fallback = True
             fallback.raw = {"error": str(exc)}
-            self._cache[normalized_query] = (now, fallback)
+            self._set_cache(normalized_query, fallback, now)
             return fallback
 
     def _expand_with_llm(self, query: str) -> QueryExpansion:
@@ -415,12 +440,16 @@ def score_resource_for_query(resource, *, terms: list[str], target_themes: list[
     canonical_theme = _normalize_token(getattr(resource, "canonical_theme", "") or "")
     subtheme = _normalize_token(resource.inferred_subtheme or "")
     keywords = _normalize_token(" ".join(getattr(resource, "keywords", []) or []))
-    llm_labels = _normalize_token(json.dumps(getattr(resource, "llm_labels", {}) or {}, ensure_ascii=False))
-    llm_raw = _normalize_token(json.dumps(getattr(resource, "llm_raw", {}) or {}, ensure_ascii=False))
+    llm_labels_obj = getattr(resource, "llm_labels", {}) or {}
+    llm_labels = _normalize_token(
+        " ".join(str(value) for value in llm_labels_obj.values()) if isinstance(llm_labels_obj, dict) else ""
+    )
+    search_text = _normalize_token(getattr(resource, "search_text", "") or "")
+    content_slice = content_text[:3000]
 
-    score = (resource.combined_score or 0.0) * 2.4
-    score += (resource.relevance_score or 0.0) * 1.2
-    score += (resource.conceptual_score or 0.0) * 0.9
+    score = (resource.combined_score or 0.0) * 0.9
+    score += (resource.relevance_score or 0.0) * 0.45
+    score += (resource.conceptual_score or 0.0) * 0.35
 
     normalized_query = _normalize_token(raw_query)
     if normalized_query and normalized_query in title:
@@ -438,9 +467,7 @@ def score_resource_for_query(resource, *, terms: list[str], target_themes: list[
         if term in content_text:
             score += 1.35
         if term in llm_labels:
-            score += 1.1
-        if term in llm_raw:
-            score += 0.55
+            score += 0.7
         if term in source_url:
             score += 0.35
 
@@ -449,6 +476,32 @@ def score_resource_for_query(resource, *, terms: list[str], target_themes: list[
         score += 2.8
     elif inferred_theme in normalized_targets:
         score += 1.9
+
+    # Robust multi-field similarity profile.
+    title_prof = similarity_profile(raw_query, title)
+    summary_prof = similarity_profile(raw_query, summary)
+    content_prof = similarity_profile(raw_query, content_slice)
+    theme_prof = similarity_profile(raw_query, f"{canonical_theme} {inferred_theme} {subtheme}")
+    label_prof = similarity_profile(raw_query, llm_labels)
+    full_prof = similarity_profile(raw_query, search_text)
+
+    score += (title_prof.score * 4.8)
+    score += (summary_prof.score * 1.8)
+    score += (content_prof.score * 1.2)
+    score += (theme_prof.score * 2.6)
+    score += (label_prof.score * 1.1)
+    score += (full_prof.score * 3.0)
+
+    # Penalize weak lexical overlap to reduce false positives.
+    max_cov = max(
+        title_prof.token_coverage,
+        summary_prof.token_coverage,
+        content_prof.token_coverage,
+        theme_prof.token_coverage,
+        full_prof.token_coverage,
+    )
+    if max_cov < 0.22 and not (title_prof.exact_substring or full_prof.exact_substring):
+        score -= 1.9
 
     uploaded_at = getattr(resource, "uploaded_at", None)
     if uploaded_at:

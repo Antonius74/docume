@@ -41,6 +41,8 @@ def _ensure_runtime_schema_updates() -> None:
         statements.append("ALTER TABLE resources ADD COLUMN canonical_theme VARCHAR(120)")
     if "author_name" not in columns:
         statements.append("ALTER TABLE resources ADD COLUMN author_name VARCHAR(160)")
+    if "search_text" not in columns:
+        statements.append("ALTER TABLE resources ADD COLUMN search_text TEXT")
 
     with engine.begin() as conn:
         for statement in statements:
@@ -73,5 +75,89 @@ def _ensure_runtime_schema_updates() -> None:
                 """
             )
         )
+        if engine.dialect.name == "postgresql":
+            conn.execute(
+                text(
+                    """
+                    UPDATE resources
+                    SET search_text = TRIM(
+                        REGEXP_REPLACE(
+                            CONCAT_WS(
+                                ' ',
+                                COALESCE(title, ''),
+                                COALESCE(description, ''),
+                                COALESCE(summary, ''),
+                                COALESCE(content_text, ''),
+                                COALESCE(source_url, ''),
+                                COALESCE(author_name, ''),
+                                COALESCE(inferred_theme, ''),
+                                COALESCE(inferred_subtheme, ''),
+                                COALESCE(canonical_theme, ''),
+                                COALESCE(CAST(keywords AS TEXT), ''),
+                                COALESCE(CAST(llm_labels AS TEXT), '')
+                            ),
+                            '\\s+',
+                            ' ',
+                            'g'
+                        )
+                    )
+                    WHERE search_text IS NULL OR TRIM(search_text) = ''
+                    """
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    UPDATE resources
+                    SET search_text = TRIM(
+                        COALESCE(title, '') || ' ' ||
+                        COALESCE(description, '') || ' ' ||
+                        COALESCE(summary, '') || ' ' ||
+                        COALESCE(content_text, '') || ' ' ||
+                        COALESCE(source_url, '') || ' ' ||
+                        COALESCE(author_name, '') || ' ' ||
+                        COALESCE(inferred_theme, '') || ' ' ||
+                        COALESCE(inferred_subtheme, '') || ' ' ||
+                        COALESCE(canonical_theme, '') || ' ' ||
+                        COALESCE(CAST(keywords AS TEXT), '') || ' ' ||
+                        COALESCE(CAST(llm_labels AS TEXT), '')
+                    )
+                    WHERE search_text IS NULL OR TRIM(search_text) = ''
+                    """
+                )
+            )
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_resources_canonical_theme ON resources (canonical_theme)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_resources_author_name ON resources (author_name)"))
+        if engine.dialect.name != "postgresql":
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_resources_search_text ON resources (search_text)"))
+
+        if engine.dialect.name == "postgresql":
+            try:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+            except Exception:  # noqa: BLE001
+                # Continue without trigram acceleration if extension isn't available.
+                pass
+
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_resources_search_tsv
+                    ON resources
+                    USING GIN (to_tsvector('simple', COALESCE(search_text, '')))
+                    """
+                )
+            )
+            try:
+                conn.execute(
+                    text(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_resources_search_trgm
+                        ON resources
+                        USING GIN (LOWER(COALESCE(search_text, '')) gin_trgm_ops)
+                        """
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                # If pg_trgm isn't enabled, keep full-text index only.
+                pass

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -7,8 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import Text as SqlText
-from sqlalchemy import asc, cast, desc, func, or_, select
+from sqlalchemy import asc, case, desc, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -26,11 +26,13 @@ from app.schemas import (
 )
 from app.services.ingestion import IngestionService
 from app.services.ollama_client import OllamaClassifier
+from app.services.search_index import build_search_text
 from app.services.semantic import (
     SemanticSearchService,
     score_resource_for_query,
 )
 from app.services.storage import remove_resource_artifacts, save_in_thematic_folder
+from app.services.text_similarity import similarity_profile
 from app.services.thumbnails import ensure_doc_thumbnail
 
 settings = get_settings()
@@ -62,6 +64,7 @@ base_dir = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=base_dir / "static"), name="static")
 templates = Jinja2Templates(directory=str(base_dir / "templates"))
 static_dir = base_dir / "static"
+_PG_TRGM_AVAILABLE: bool | None = None
 
 
 def _asset_version() -> int:
@@ -73,6 +76,46 @@ def _asset_version() -> int:
         except OSError:
             continue
     return max(mtimes) if mtimes else int(datetime.now(timezone.utc).timestamp())
+
+
+def _is_postgres_backend() -> bool:
+    return settings.database_url.lower().startswith("postgresql")
+
+
+def _normalized_search_terms(raw_terms: list[str], *, max_items: int = 10) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_terms:
+        cleaned = re.sub(r"[^0-9A-Za-zÀ-ÿ\s\-_/]+", " ", str(raw or "")).strip().lower()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if len(cleaned) < 2:
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        output.append(cleaned)
+        if len(output) >= max_items:
+            break
+    return output
+
+
+def _pg_trgm_enabled(db: Session) -> bool:
+    global _PG_TRGM_AVAILABLE  # noqa: PLW0603
+
+    if not _is_postgres_backend():
+        return False
+    if _PG_TRGM_AVAILABLE is not None:
+        return _PG_TRGM_AVAILABLE
+
+    try:
+        result = db.execute(
+            text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")
+        ).scalar()
+        _PG_TRGM_AVAILABLE = bool(result)
+    except Exception:  # noqa: BLE001
+        _PG_TRGM_AVAILABLE = False
+
+    return _PG_TRGM_AVAILABLE
 
 
 def _link_thumbnail_from_labels(resource: Resource) -> str | None:
@@ -180,6 +223,23 @@ async def _reclassify_existing_resources() -> None:
                 resource.author_name = normalized_author
                 prefill_changed = True
                 author_changed = True
+
+            current_search_text = build_search_text(
+                title=resource.title,
+                description=resource.description,
+                summary=resource.summary,
+                content_text=base_content,
+                source_url=resource.source_url,
+                author_name=resource.author_name,
+                inferred_theme=resource.inferred_theme,
+                inferred_subtheme=resource.inferred_subtheme,
+                canonical_theme=resource.canonical_theme,
+                keywords=resource.keywords or [],
+                llm_labels=labels if isinstance(labels, dict) else {},
+            )
+            if resource.search_text != current_search_text:
+                resource.search_text = current_search_text
+                prefill_changed = True
 
             # If the LLM inferred a specific theme but canonical theme is still
             # "General", align canonical taxonomy without waiting for full re-run.
@@ -312,6 +372,23 @@ async def _reclassify_existing_resources() -> None:
                 resource.thematic_path = new_thematic_path
                 changed = True
 
+            refreshed_search_text = build_search_text(
+                title=resource.title,
+                description=resource.description,
+                summary=resource.summary,
+                content_text=base_content,
+                source_url=resource.source_url,
+                author_name=resource.author_name,
+                inferred_theme=resource.inferred_theme,
+                inferred_subtheme=resource.inferred_subtheme,
+                canonical_theme=resource.canonical_theme,
+                keywords=resource.keywords or [],
+                llm_labels=resource.llm_labels if isinstance(resource.llm_labels, dict) else {},
+            )
+            if resource.search_text != refreshed_search_text:
+                resource.search_text = refreshed_search_text
+                changed = True
+
         if changed:
             db.commit()
     finally:
@@ -388,6 +465,7 @@ def list_resources(
     detail: str | None = Query(default=None),
     source_type: str | None = Query(default=None),
     semantic: bool = Query(default=True),
+    live: bool = Query(default=False),
     sort_by: str = Query(default="pertinence", pattern="^(pertinence|date)$"),
     order: str = Query(default="desc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
@@ -406,44 +484,67 @@ def list_resources(
     theme_expr = func.coalesce(Resource.canonical_theme, Resource.inferred_theme, "Uncategorized")
 
     normalized_q = (q or "").strip()
+    expansion = None
+    search_terms: list[str] = []
+    rank_expr = None
+    trigram_rank_expr = None
+    contains_expr = None
 
     if normalized_q:
-        expansion = semantic_search_service.expand_query(normalized_q, use_llm=semantic)
-        search_terms = expansion.merged_terms(max_items=16)
+        use_semantic_expansion = semantic and not live
+        expansion = semantic_search_service.expand_query(normalized_q, use_llm=use_semantic_expansion)
+        if live:
+            search_terms = _normalized_search_terms([normalized_q], max_items=4)
+        else:
+            search_terms = _normalized_search_terms(expansion.merged_terms(max_items=16), max_items=10)
+        if not search_terms:
+            search_terms = _normalized_search_terms([normalized_q], max_items=6)
 
-        if search_terms:
-            term_filters = []
-            normalized_query = normalized_q.lower()
-            for term in search_terms:
-                if len(term) < 2:
-                    continue
-                like = f"%{term}%"
-                term_filters.extend(
-                    [
-                        Resource.title.ilike(like),
-                        Resource.description.ilike(like),
-                        Resource.summary.ilike(like),
-                        Resource.content_text.ilike(like),
-                        Resource.source_url.ilike(like),
-                        Resource.author_name.ilike(like),
-                        Resource.inferred_theme.ilike(like),
-                        Resource.inferred_subtheme.ilike(like),
-                        Resource.canonical_theme.ilike(like),
-                        cast(Resource.keywords, SqlText).ilike(like),
-                        cast(Resource.llm_labels, SqlText).ilike(like),
-                        cast(Resource.llm_raw, SqlText).ilike(like),
-                    ]
-                )
+        if live:
+            theme_filters = []
+        else:
             theme_filters = [
                 func.lower(theme_expr) == target_theme.lower()
                 for target_theme in (expansion.target_themes if expansion else [])
             ]
+
+        if _is_postgres_backend():
+            query_text = " ".join(search_terms)
+            if not query_text:
+                fallback_terms = _normalized_search_terms([normalized_q], max_items=1)
+                query_text = fallback_terms[0] if fallback_terms else normalized_q
+            ts_query = func.websearch_to_tsquery("simple", query_text)
+            search_vector = func.to_tsvector("simple", func.coalesce(Resource.search_text, ""))
+            rank_expr = func.coalesce(func.ts_rank_cd(search_vector, ts_query), 0.0)
+            text_filter = search_vector.op("@@")(ts_query)
+            search_expr = func.lower(func.coalesce(Resource.search_text, ""))
+            contains_expr = search_expr.ilike(f"%{query_text.lower()}%")
+            combined_filters = [text_filter]
+            combined_filters.append(contains_expr)
+
+            raw_tokens = [token for token in query_text.lower().split(" ") if len(token) >= 2]
+            token_filters = [search_expr.ilike(f"%{token}%") for token in raw_tokens]
+            prefix_filters = [search_expr.ilike(f"%{token[:3]}%") for token in raw_tokens if len(token) >= 4]
+            combined_filters.extend(token_filters)
+            combined_filters.extend(prefix_filters)
+
+            if _pg_trgm_enabled(db):
+                normalized_query = query_text.lower()
+                trigram_rank_expr = func.similarity(search_expr, normalized_query)
+                trigram_match = search_expr.op("%")(normalized_query)
+                combined_filters.append(trigram_match)
+
+            combined_filters.extend(theme_filters)
+            if combined_filters:
+                query = query.where(or_(*combined_filters))
+        else:
+            term_filters = []
+            for term in search_terms:
+                like = f"%{term}%"
+                term_filters.append(Resource.search_text.ilike(like))
             combined_filters = [*term_filters, *theme_filters]
             if combined_filters:
                 query = query.where(or_(*combined_filters))
-    else:
-        expansion = None
-        search_terms = []
 
     if theme:
         query = query.where(func.lower(theme_expr) == theme.lower())
@@ -462,8 +563,150 @@ def list_resources(
     offset = (page - 1) * page_size
     reverse_order = order == "desc"
 
-    if normalized_q:
-        candidates = db.scalars(query.limit(600)).all()
+    if normalized_q and rank_expr is not None:
+        if contains_expr is not None:
+            contains_rank = case((contains_expr, 1.0), else_=0.0)
+            rank_expr = (rank_expr * 0.60) + (contains_rank * 0.40)
+        if trigram_rank_expr is not None:
+            rank_expr = (func.coalesce(rank_expr, 0.0) * 0.72) + (func.coalesce(trigram_rank_expr, 0.0) * 0.28)
+
+        if live:
+            candidate_limit = max(60, page_size * max(page, 1) * 5)
+            candidate_limit = min(candidate_limit, 400)
+        else:
+            candidate_limit = max(120, page_size * max(page, 1) * 12)
+            candidate_limit = min(candidate_limit, 1500)
+        candidate_query = query
+        if reverse_order:
+            candidate_query = candidate_query.order_by(
+                desc(rank_expr),
+                desc(Resource.combined_score),
+                desc(Resource.uploaded_at),
+            )
+        else:
+            candidate_query = candidate_query.order_by(
+                asc(rank_expr),
+                asc(Resource.combined_score),
+                asc(Resource.uploaded_at),
+            )
+        candidates = db.scalars(candidate_query.limit(candidate_limit)).all()
+
+        rescored: list[tuple[Resource, float]] = []
+        rescored_raw: list[tuple[Resource, float, float, float, float, float, bool, bool, bool]] = []
+        query_lower = normalized_q.lower()
+        target_theme_set = {
+            str(theme_name or "").strip().lower()
+            for theme_name in (expansion.target_themes if expansion else [])
+            if str(theme_name or "").strip()
+        }
+        if len(query_lower) <= 3:
+            min_sim_threshold = 0.03
+        elif len(query_lower) <= 7:
+            min_sim_threshold = 0.06
+        else:
+            min_sim_threshold = 0.14
+
+        for item in candidates:
+            search_blob = getattr(item, "search_text", "") or ""
+            full_profile = similarity_profile(query_lower, search_blob)
+            title_profile = similarity_profile(query_lower, item.title or "")
+            similarity = max(full_profile.score, min(1.0, title_profile.score * 1.10))
+            token_coverage = max(full_profile.token_coverage, title_profile.token_coverage)
+            prefix_coverage = max(full_profile.prefix_coverage, title_profile.prefix_coverage)
+            exact_match = full_profile.exact_substring or title_profile.exact_substring
+            title_token_coverage = title_profile.token_coverage
+            title_blob = (item.title or "").lower()
+            source_blob = (item.source_url or "").lower()
+            keep_by_contains = query_lower in title_blob or query_lower in source_blob
+            item_theme = str(item.canonical_theme or item.inferred_theme or "").strip().lower()
+            theme_match = (not target_theme_set) or (item_theme in target_theme_set)
+
+            score = score_resource_for_query(
+                item,
+                terms=search_terms,
+                target_themes=expansion.target_themes if expansion else [],
+                raw_query=normalized_q,
+            )
+            rescored_raw.append(
+                (
+                    item,
+                    score,
+                    similarity,
+                    token_coverage,
+                    prefix_coverage,
+                    title_token_coverage,
+                    exact_match,
+                    keep_by_contains,
+                    theme_match,
+                )
+            )
+
+        if live and rescored_raw:
+            best_similarity = max(entry[2] for entry in rescored_raw)
+            dynamic_threshold = max(min_sim_threshold, best_similarity * 0.68)
+            min_coverage = 0.15 if len(query_lower) <= 3 else 0.34
+            absolute_floor = 0.18 if len(query_lower) <= 4 else 0.24
+            rescored = [
+                (item, score)
+                for (
+                    item,
+                    score,
+                    similarity,
+                    token_coverage,
+                    prefix_coverage,
+                    title_token_coverage,
+                    exact_match,
+                    keep_by_contains,
+                    theme_match,
+                ) in rescored_raw
+                if (
+                    (
+                        exact_match
+                        or keep_by_contains
+                        or (
+                            similarity >= max(dynamic_threshold, absolute_floor)
+                            and (token_coverage >= min_coverage or prefix_coverage >= 0.50)
+                        )
+                    )
+                    and (
+                        theme_match
+                        or keep_by_contains
+                        or title_token_coverage >= 0.95
+                        or exact_match
+                    )
+                )
+            ]
+        else:
+            rescored = [
+                (item, score)
+                for item, score, similarity, token_coverage, _, _, exact_match, keep_by_contains, _ in rescored_raw
+                if exact_match or keep_by_contains or token_coverage >= 0.18 or similarity >= 0.20
+            ]
+
+        if sort_by == "date":
+            rescored.sort(
+                key=lambda pair: (
+                    safe_uploaded_at(pair[0]),
+                    pair[1],
+                ),
+                reverse=reverse_order,
+            )
+        else:
+            rescored.sort(
+                key=lambda pair: (
+                    pair[1],
+                    safe_uploaded_at(pair[0]),
+                ),
+                reverse=reverse_order,
+            )
+
+        if live:
+            total = len(rescored)
+        else:
+            total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+        items = [pair[0] for pair in rescored[offset : offset + page_size]]
+    elif normalized_q:
+        candidates = db.scalars(query.limit(320)).all()
         scored = [
             (
                 item,

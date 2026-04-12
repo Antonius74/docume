@@ -9,6 +9,7 @@ const state = {
   themes: [],
   themeTree: [],
   authors: [],
+  resourcesController: null,
 };
 
 const elements = {
@@ -484,6 +485,7 @@ function buildResourcesQuery() {
   }
   if (q) {
     params.set("q", q);
+    params.set("live", "true");
   }
   if (sourceType) {
     params.set("source_type", sourceType);
@@ -653,7 +655,25 @@ async function loadResources() {
   }
 
   const query = buildResourcesQuery();
-  const response = await fetch(`/api/resources?${query}`);
+  if (state.resourcesController) {
+    state.resourcesController.abort();
+  }
+  const controller = new AbortController();
+  state.resourcesController = controller;
+
+  let response;
+  try {
+    response = await fetch(`/api/resources?${query}`, { signal: controller.signal });
+  } catch (error) {
+    if (error && error.name === "AbortError") {
+      return;
+    }
+    throw error;
+  } finally {
+    if (state.resourcesController === controller) {
+      state.resourcesController = null;
+    }
+  }
   if (!response.ok) {
     throw new Error("Impossibile caricare i file della cartella");
   }
@@ -796,7 +816,7 @@ function debounce(callback, timeout = 300) {
 const debouncedSearch = debounce(() => {
   state.page = 1;
   loadResources().catch((err) => setStatus(err.message, true));
-}, 300);
+}, 120);
 
 async function bootstrap() {
   setMode("file");

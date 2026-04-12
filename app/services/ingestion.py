@@ -11,6 +11,7 @@ from app.config import Settings
 from app.models import Resource
 from app.services.extractors import extract_from_file, extract_from_link
 from app.services.ollama_client import OllamaClassifier
+from app.services.search_index import build_search_text
 from app.services.storage import save_file_bytes, save_in_thematic_folder
 
 
@@ -21,6 +22,21 @@ class IngestionService:
 
     def _touch_duplicate(self, db: Session, resource: Resource) -> Resource:
         resource.uploaded_at = datetime.now(timezone.utc)
+        if not (resource.search_text or "").strip():
+            labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+            resource.search_text = build_search_text(
+                title=resource.title,
+                description=resource.description,
+                summary=resource.summary,
+                content_text=resource.content_text,
+                source_url=resource.source_url,
+                author_name=resource.author_name,
+                inferred_theme=resource.inferred_theme,
+                inferred_subtheme=resource.inferred_subtheme,
+                canonical_theme=resource.canonical_theme,
+                keywords=resource.keywords or [],
+                llm_labels=labels,
+            )
         db.add(resource)
         db.commit()
         db.refresh(resource)
@@ -177,6 +193,19 @@ class IngestionService:
             keywords=safe_keywords,
             summary=self._sanitize_text(classification.summary, max_len=1200),
             content_text=searchable_text,
+            search_text=build_search_text(
+                title=self._sanitize_text(classification.title, max_len=500) or inferred_title,
+                description=extracted_description,
+                summary=self._sanitize_text(classification.summary, max_len=1200),
+                content_text=searchable_text,
+                source_url=normalized_url,
+                author_name=author_name,
+                inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
+                inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
+                canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),
+                keywords=safe_keywords,
+                llm_labels=safe_llm_labels,
+            ),
             relevance_score=classification.relevance_score,
             conceptual_score=classification.conceptual_score,
             combined_score=classification.combined_score,
@@ -292,6 +321,19 @@ class IngestionService:
             keywords=safe_keywords,
             summary=self._sanitize_text(classification.summary, max_len=1200),
             content_text=searchable_text,
+            search_text=build_search_text(
+                title=self._sanitize_text(classification.title, max_len=500) or inferred_title,
+                description=sanitized_description,
+                summary=self._sanitize_text(classification.summary, max_len=1200),
+                content_text=searchable_text,
+                source_url=None,
+                author_name=author_name,
+                inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
+                inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
+                canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),
+                keywords=safe_keywords,
+                llm_labels=safe_llm_labels,
+            ),
             relevance_score=classification.relevance_score,
             conceptual_score=classification.conceptual_score,
             combined_score=classification.combined_score,

@@ -29,6 +29,7 @@ class Resource(Base):
     keywords = Column(JSON, nullable=False, default=list)
     summary = Column(Text, nullable=True)
     content_text = Column(Text, nullable=True)
+    search_text = Column(Text, nullable=True)
 
     relevance_score = Column(Float, nullable=False, default=0.0, index=True)
     conceptual_score = Column(Float, nullable=False, default=0.0)
