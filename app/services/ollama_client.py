@@ -1,17 +1,42 @@
 import json
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
 import httpx
 
+from app.services.default_taxonomy import DEFAULT_TAXONOMY_TREE
+
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 _TIPOLOGIA_PATTERN = re.compile(r"tipologia\s+documento\s*:\s*(.+)", re.IGNORECASE)
 _CONTENUTO_PATTERN = re.compile(r"^\s*contenuto\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 _DETTAGLIO_PATTERN = re.compile(r"dettaglio\s+contenuto\s*:\s*(.+)", re.IGNORECASE)
+_TAG_SPLIT_RE = re.compile(r"[,;|\n]")
+_SMALL_CONNECTOR_WORDS = {
+    "e",
+    "ed",
+    "di",
+    "da",
+    "del",
+    "della",
+    "delle",
+    "dei",
+    "degli",
+    "du",
+    "de",
+    "of",
+    "the",
+    "and",
+    "a",
+    "an",
+    "in",
+    "con",
+    "per",
+}
 ALLOWED_CANONICAL_THEMES = [
     "Matematica e Statistica",
     "Fisica e Scienze",
@@ -79,6 +104,15 @@ THEME_ALIASES = {
     "attualità": "Media e Comunicazione",
     "cronaca": "Media e Comunicazione",
     "politica": "Media e Comunicazione",
+}
+
+CATEGORY_MERGE_ALIASES = {
+    "film e serie": "Film e Cinema",
+    "film e tv": "Film e Cinema",
+    "cinema e tv": "Film e Cinema",
+    "movie e serie": "Film e Cinema",
+    "link youtube": "Siti Web e Articoli",
+    "youtube link": "Siti Web e Articoli",
 }
 
 FALLBACK_THEME_TERMS: dict[str, list[str]] = {
@@ -297,6 +331,13 @@ class ClassificationResult:
     model_used: str
     raw: dict
     fallback_used: bool
+    semantic_theme: str | None = None
+    semantic_subtheme: str | None = None
+    taxonomy_domain: str | None = None
+    taxonomy_subdomain: str | None = None
+    taxonomy_author: str | None = None
+    taxonomy_work: str | None = None
+    taxonomy_path: str | None = None
 
 
 class OllamaClassifier:
@@ -323,10 +364,25 @@ class OllamaClassifier:
         self.category_catalog_path = Path(category_catalog_path) if category_catalog_path else None
         self._allowed_canonical_themes: list[str] = list(ALLOWED_CANONICAL_THEMES)
         self._theme_aliases: dict[str, str] = dict(THEME_ALIASES)
+        for alias_key, target in CATEGORY_MERGE_ALIASES.items():
+            self._theme_aliases[self._normalize_catalog_token(alias_key)] = target
         self._fallback_theme_terms: dict[str, list[str]] = {
             key: list(values) for key, values in FALLBACK_THEME_TERMS.items()
         }
+        self._taxonomy_tree: dict[str, dict[str, dict[str, list[str]]]] = deepcopy(DEFAULT_TAXONOMY_TREE)
+        self._taxonomy_paths: list[str] = []
+        self._refresh_taxonomy_paths()
         self._load_category_catalog()
+        self._merge_taxonomy_into_catalog()
+
+    def _merge_category_label(self, value: object) -> str:
+        candidate = self._titleize_category(value)
+        if not candidate:
+            return ""
+        merge_target = CATEGORY_MERGE_ALIASES.get(self._normalize_catalog_token(candidate))
+        if merge_target:
+            return self._titleize_category(merge_target) or candidate
+        return candidate
 
     def _normalize_catalog_token(self, value: object) -> str:
         candidate = str(value or "").strip().lower()
@@ -348,7 +404,14 @@ class OllamaClassifier:
         if not candidate:
             return ""
 
-        words = [self._smart_capitalize_word(word) for word in candidate.split(" ") if word]
+        words: list[str] = []
+        for index, word in enumerate(candidate.split(" ")):
+            if not word:
+                continue
+            normalized_word = self._smart_capitalize_word(word)
+            if index > 0 and normalized_word.lower() in _SMALL_CONNECTOR_WORDS:
+                normalized_word = normalized_word.lower()
+            words.append(normalized_word)
         titled = " ".join(words).strip()
         return titled[:120]
 
@@ -393,7 +456,7 @@ class OllamaClassifier:
 
             if isinstance(categories, list):
                 for category in categories:
-                    formatted = self._titleize_category(category)
+                    formatted = self._merge_category_label(category)
                     if not formatted:
                         continue
                     lowered = formatted.lower()
@@ -404,7 +467,7 @@ class OllamaClassifier:
             if isinstance(aliases, dict):
                 for alias, category in aliases.items():
                     alias_key = self._normalize_catalog_token(alias)
-                    canonical = self._titleize_category(category)
+                    canonical = self._merge_category_label(category)
                     if not alias_key or not canonical:
                         continue
                     lowered = canonical.lower()
@@ -415,7 +478,7 @@ class OllamaClassifier:
 
             if isinstance(terms, dict):
                 for category, items in terms.items():
-                    canonical = self._titleize_category(category)
+                    canonical = self._merge_category_label(category)
                     if not canonical:
                         continue
                     if canonical not in self._fallback_theme_terms:
@@ -427,6 +490,54 @@ class OllamaClassifier:
                                 self._fallback_theme_terms[canonical].append(token)
 
             # Persist normalized catalog.
+            self._save_category_catalog()
+
+    def _refresh_taxonomy_paths(self) -> None:
+        paths: list[str] = []
+        for domain, subdomains in self._taxonomy_tree.items():
+            for subdomain, authors in subdomains.items():
+                for author, works in authors.items():
+                    if not works:
+                        paths.append(f"{domain} > {subdomain} > {author} > Sconosciuto")
+                        continue
+                    for work in works:
+                        paths.append(f"{domain} > {subdomain} > {author} > {work}")
+        self._taxonomy_paths = sorted(set(paths))
+
+    def _merge_taxonomy_into_catalog(self) -> None:
+        with self._catalog_lock:
+            existing_lowers = {item.lower() for item in self._allowed_canonical_themes}
+            for domain, subdomains in self._taxonomy_tree.items():
+                domain_clean = self._merge_category_label(domain)
+                if not domain_clean:
+                    continue
+                if domain_clean.lower() not in existing_lowers:
+                    self._allowed_canonical_themes.append(domain_clean)
+                    existing_lowers.add(domain_clean.lower())
+                domain_alias_key = self._normalize_catalog_token(domain_clean)
+                self._theme_aliases.setdefault(domain_alias_key, domain_clean)
+
+                domain_terms = self._fallback_theme_terms.setdefault(domain_clean, [])
+                for subdomain, authors in subdomains.items():
+                    sub_token = self._normalize_catalog_token(subdomain)
+                    if sub_token and sub_token not in domain_terms:
+                        domain_terms.append(sub_token)
+                    if sub_token and sub_token not in self._theme_aliases:
+                        self._theme_aliases[sub_token] = domain_clean
+
+                    for author, works in authors.items():
+                        author_token = self._normalize_catalog_token(author)
+                        if author_token and author_token not in domain_terms:
+                            domain_terms.append(author_token)
+                        if author_token and author_token not in self._theme_aliases:
+                            self._theme_aliases[author_token] = domain_clean
+                        for work in works or []:
+                            work_token = self._normalize_catalog_token(work)
+                            if work_token and work_token not in domain_terms:
+                                domain_terms.append(work_token)
+                            if work_token and work_token not in self._theme_aliases:
+                                self._theme_aliases[work_token] = domain_clean
+
             self._save_category_catalog()
 
     def _allowed_categories_snapshot(self) -> list[str]:
@@ -457,8 +568,579 @@ class OllamaClassifier:
             "con nome breve e specifico (2-5 parole)."
         )
 
+    def _taxonomy_prompt_block(self, *, max_items: int = 240) -> str:
+        if not self._taxonomy_paths:
+            return "Tassonomia predefinita: General > Generale > Sconosciuto > Contenuto non classificato"
+        visible = self._taxonomy_paths[:max_items]
+        extra = len(self._taxonomy_paths) - len(visible)
+        suffix = f"\n... (+{extra} percorsi aggiuntivi)" if extra > 0 else ""
+        return (
+            "Tassonomia predefinita (Tipo -> Genere -> Autore -> Titolo). "
+            "Scegli il percorso più vicino:\n"
+            + "\n".join(visible)
+            + suffix
+        )
+
+    def _match_from_options(self, value: str, options: list[str]) -> str:
+        cleaned = self._clean_field_value(value, max_len=220).lower()
+        if not cleaned or not options:
+            return options[0] if options else "General"
+
+        # Exact
+        for option in options:
+            if cleaned == option.lower():
+                return option
+
+        # Containment
+        for option in options:
+            option_lower = option.lower()
+            if cleaned in option_lower or option_lower in cleaned:
+                return option
+
+        # Token overlap fallback.
+        candidate_tokens = set(re.findall(r"[a-z0-9à-ÿ]{3,}", cleaned))
+        if not candidate_tokens:
+            return options[0]
+        scored: list[tuple[float, str]] = []
+        for option in options:
+            option_tokens = set(re.findall(r"[a-z0-9à-ÿ]{3,}", option.lower()))
+            if not option_tokens:
+                continue
+            overlap = len(candidate_tokens & option_tokens) / max(1, len(candidate_tokens | option_tokens))
+            scored.append((overlap, option))
+        if not scored:
+            return options[0]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if scored[0][0] <= 0:
+            return options[0]
+        return scored[0][1]
+
+    def _parse_taxonomy_selection(self, text: str) -> dict[str, str]:
+        raw = (text or "").strip()
+        if not raw:
+            return {}
+
+        # JSON support.
+        maybe_json = self._parse_json(raw)
+        if isinstance(maybe_json, dict):
+            return {
+                "domain": self._clean_field_value(
+                    maybe_json.get("domain")
+                    or maybe_json.get("dominio")
+                    or maybe_json.get("tipo")
+                    or maybe_json.get("tipologia")
+                ),
+                "subdomain": self._clean_field_value(
+                    maybe_json.get("subdomain")
+                    or maybe_json.get("sottodominio")
+                    or maybe_json.get("genere")
+                ),
+                "author": self._clean_field_value(maybe_json.get("author") or maybe_json.get("autore")),
+                "work": self._clean_field_value(
+                    maybe_json.get("work")
+                    or maybe_json.get("opera")
+                    or maybe_json.get("titolo")
+                ),
+            }
+
+        output: dict[str, str] = {}
+        for line in raw.splitlines():
+            cleaned = line.strip().lstrip("-*•").strip()
+            if ":" not in cleaned:
+                continue
+            key, value = cleaned.split(":", 1)
+            key_norm = " ".join(key.lower().split())
+            val = self._clean_field_value(value, max_len=220)
+            if not val:
+                continue
+            if key_norm in {"dominio", "domain", "tema", "tipo", "tipologia", "tipologia contenuto"}:
+                output["domain"] = val
+            elif key_norm in {"sottodominio", "subdomain", "subcategory", "genere", "categoria"}:
+                output["subdomain"] = val
+            elif key_norm in {"autore", "author", "creator"}:
+                output["author"] = val
+            elif key_norm in {"opera", "work", "titolo opera", "titolo"}:
+                output["work"] = val
+        return output
+
+    def _fallback_taxonomy_type(
+        self,
+        *,
+        source_type: str,
+        source_url: str | None,
+        inferred_theme: str | None = None,
+        mime_type: str | None = None,
+    ) -> str:
+        return self._map_signal_to_taxonomy_type(
+            signal=inferred_theme,
+            source_type=source_type,
+            source_url=source_url,
+            mime_type=mime_type,
+        )
+
+    def _map_signal_to_taxonomy_type(
+        self,
+        *,
+        signal: str | None,
+        source_type: str,
+        source_url: str | None,
+        mime_type: str | None = None,
+    ) -> str:
+        source_clean = (source_type or "").strip().lower()
+        mime = (mime_type or "").lower()
+        url = (source_url or "").lower()
+        is_youtube = "youtube.com" in url or "youtu.be" in url
+        normalized_theme = self._normalize_canonical_theme(signal, allow_create=False)
+        normalized_signal = self._normalize_catalog_token(signal)
+
+        if mime.startswith("image/"):
+            return "Immagini e Arte Visiva"
+        if mime.startswith("audio/"):
+            return "Musica e Audio"
+        if mime.startswith("video/"):
+            return "Film e Cinema"
+
+        if normalized_theme in {"Musica e Arte"}:
+            return "Musica e Audio"
+        if normalized_theme in {"Media e Comunicazione"}:
+            return "Siti Web e Articoli"
+        if normalized_theme in {
+            "Matematica e Statistica",
+            "Fisica e Scienze",
+            "AI e Machine Learning",
+            "Programmazione e Software",
+            "Data Engineering e Analytics",
+        }:
+            if source_clean == "file":
+                return "Libri e Documenti"
+            if source_clean == "link" and not is_youtube:
+                return "Siti Web e Articoli"
+            return "Corsi e Formazione"
+        if normalized_theme in {"Legal e Compliance", "Finanza", "Business e Marketing"}:
+            if source_clean == "link":
+                return "Siti Web e Articoli"
+            return "Libri e Documenti"
+
+        if any(token in normalized_signal for token in ("film", "cinema", "serie", "movie", "documentario")):
+            return "Film e Cinema"
+        if any(token in normalized_signal for token in ("musica", "music", "podcast", "concerto", "album")):
+            return "Musica e Audio"
+        if any(token in normalized_signal for token in ("articolo", "blog", "news", "notizie", "giornale")):
+            return "Siti Web e Articoli"
+
+        if is_youtube:
+            return "Corsi e Formazione"
+
+        if source_clean == "file":
+            return "Libri e Documenti"
+        if source_clean == "link":
+            return "Siti Web e Articoli"
+        return "General"
+
+    def _taxonomy_selection_fallback(
+        self,
+        *,
+        title: str,
+        description: str | None,
+        extracted_text: str,
+        source_type: str,
+        source_url: str | None,
+        mime_type: str | None = None,
+    ) -> dict[str, str]:
+        merged = " ".join(part for part in [title, description or "", extracted_text or ""] if part)
+        inferred_theme, _, matched = self._infer_theme_from_text(merged, source_url=source_url)
+        domain = self._fallback_taxonomy_type(
+            source_type=source_type,
+            source_url=source_url,
+            inferred_theme=inferred_theme,
+            mime_type=mime_type,
+        )
+        if self._is_generic_value(domain):
+            domain = self._normalize_canonical_theme(inferred_theme, allow_create=True)
+        subdomains = list((self._taxonomy_tree.get(domain) or {"Generale": {"Sconosciuto": ["Contenuto"]}}).keys())
+        subdomain = self._match_from_options(inferred_theme or "Generale", subdomains)
+        authors = list((self._taxonomy_tree.get(domain, {}).get(subdomain) or {"Sconosciuto": ["Contenuto"]}).keys())
+        author = self._match_from_options(" ".join(matched) or "Sconosciuto", authors)
+        works = (self._taxonomy_tree.get(domain, {}).get(subdomain, {}).get(author) or ["Contenuto non classificato"])
+        work = self._match_from_options(title or "Contenuto non classificato", works)
+        return {"domain": domain, "subdomain": subdomain, "author": author, "work": work}
+
+    async def _select_taxonomy(
+        self,
+        *,
+        title: str,
+        description: str | None,
+        extracted_text: str,
+        source_type: str,
+        source_url: str | None,
+        mime_type: str | None = None,
+        selected_model: str,
+    ) -> dict[str, str]:
+        prompt_payload = {
+            "source_type": source_type,
+            "title": title,
+            "description": description,
+            "source_url": source_url,
+            "content_preview": (extracted_text or "")[:7000],
+        }
+        taxonomy_block = self._taxonomy_prompt_block(max_items=260)
+        system_prompt = (
+            "Sei un classificatore tassonomico. "
+            "Scegli il percorso più coerente dalla tassonomia fornita. "
+            "Rispondi solo con 4 righe: Tipo, Genere, Autore, Titolo."
+        )
+        user_prompt = (
+            "Seleziona il percorso tassonomico migliore.\n"
+            "Formato risposta obbligatorio:\n"
+            "Tipo: <...>\n"
+            "Genere: <...>\n"
+            "Autore: <...>\n"
+            "Titolo: <...>\n"
+            "YouTube e solo una fonte/link: NON usarlo come Tipo o Genere.\n"
+            "Se autore o titolo non sono chiari usa Sconosciuto.\n"
+            f"{taxonomy_block}\n"
+            f"Input: {json.dumps(prompt_payload, ensure_ascii=False)}"
+        )
+
+        request_body = {
+            "model": selected_model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                resolved_model = await self._resolve_model_name(client, selected_model)
+                request_body["model"] = resolved_model
+                response = await client.post(f"{self.base_url}/api/chat", json=request_body)
+                response.raise_for_status()
+                response_json = response.json()
+
+            parsed = self._parse_taxonomy_selection(str(response_json.get("message", {}).get("content", "")))
+        except Exception:  # noqa: BLE001
+            parsed = {}
+
+        if not parsed:
+            parsed = self._taxonomy_selection_fallback(
+                title=title,
+                description=description,
+                extracted_text=extracted_text,
+                source_type=source_type,
+                source_url=source_url,
+                mime_type=mime_type,
+            )
+
+        domain_options = list(self._taxonomy_tree.keys()) or ["General"]
+        parsed_domain = parsed.get("domain") or "General"
+        if self._is_generic_value(parsed_domain):
+            parsed_domain = "General"
+        domain = self._match_from_options(parsed_domain, domain_options)
+        normalized_parsed_domain = self._normalize_catalog_token(parsed_domain)
+        normalized_domain_options = {self._normalize_catalog_token(item) for item in domain_options}
+        if (
+            parsed_domain
+            and not self._is_generic_value(parsed_domain)
+            and normalized_parsed_domain not in normalized_domain_options
+        ):
+            mapped_domain = self._map_signal_to_taxonomy_type(
+                signal=parsed_domain,
+                source_type=source_type,
+                source_url=source_url,
+                mime_type=mime_type,
+            )
+            if self._normalize_catalog_token(mapped_domain) in normalized_domain_options:
+                domain = mapped_domain
+
+        subdomain_options = list((self._taxonomy_tree.get(domain) or {"Generale": {"Sconosciuto": ["Contenuto"]}}).keys())
+        parsed_subdomain = parsed.get("subdomain") or "Generale"
+        if self._is_generic_value(parsed_subdomain):
+            parsed_subdomain = "Generale"
+        subdomain = self._match_from_options(parsed_subdomain, subdomain_options)
+        if (
+            parsed_subdomain
+            and not self._is_generic_value(parsed_subdomain)
+            and self._normalize_catalog_token(parsed_subdomain)
+            not in {self._normalize_catalog_token(item) for item in subdomain_options}
+        ):
+            subdomain = self._clean_field_value(parsed_subdomain, max_len=120) or "Generale"
+
+        author_options = list((self._taxonomy_tree.get(domain, {}).get(subdomain) or {"Sconosciuto": ["Contenuto"]}).keys())
+        parsed_author = parsed.get("author") or "Sconosciuto"
+        if self._is_generic_value(parsed_author):
+            author = "Sconosciuto"
+        else:
+            author = self._match_from_options(parsed_author, author_options)
+
+        parsed_work = parsed.get("work") or title or "Contenuto non classificato"
+        if self._is_generic_value(parsed_work):
+            work = "Contenuto non classificato"
+        else:
+            work_options = self._taxonomy_tree.get(domain, {}).get(subdomain, {}).get(author) or []
+            if work_options:
+                work = self._match_from_options(parsed_work, work_options)
+            else:
+                work = self._clean_field_value(parsed_work, max_len=180) or "Contenuto non classificato"
+        return {
+            "domain": domain,
+            "subdomain": subdomain,
+            "author": author,
+            "work": work,
+            "path": f"{domain} > {subdomain} > {author} > {work}",
+        }
+
+    def _is_generic_value(self, value: object) -> bool:
+        candidate = self._normalize_catalog_token(value)
+        if not candidate:
+            return True
+        generic = {
+            "general",
+            "generale",
+            "sconosciuto",
+            "unknown",
+            "n/a",
+            "na",
+            "none",
+            "null",
+            "contenuto",
+            "contenuto non classificato",
+            "misc",
+            "varie",
+            "altro",
+            "uncategorized",
+            "non classificato",
+        }
+        return candidate in generic
+
+    def _ensure_taxonomy_branch(
+        self,
+        *,
+        domain: object,
+        subdomain: object,
+        author: object,
+        work: object,
+    ) -> dict[str, str]:
+        normalized_domain = self._normalize_canonical_theme(domain, allow_create=True)
+
+        normalized_subdomain = self._clean_field_value(subdomain or "Generale", max_len=120) or "Generale"
+        if self._is_generic_value(normalized_subdomain):
+            normalized_subdomain = "Generale"
+
+        normalized_author = self._sanitize_author_name(author) or "Sconosciuto"
+        normalized_work = self._clean_field_value(work or "Contenuto non classificato", max_len=180)
+        if not normalized_work:
+            normalized_work = "Contenuto non classificato"
+
+        domain_node = self._taxonomy_tree.setdefault(normalized_domain, {})
+        subdomain_node = domain_node.setdefault(normalized_subdomain, {})
+        works = subdomain_node.setdefault(normalized_author, [])
+
+        if normalized_work not in works:
+            works.append(normalized_work)
+
+        self._refresh_taxonomy_paths()
+        self._merge_taxonomy_into_catalog()
+
+        return {
+            "domain": normalized_domain,
+            "subdomain": normalized_subdomain,
+            "author": normalized_author,
+            "work": normalized_work,
+            "path": f"{normalized_domain} > {normalized_subdomain} > {normalized_author} > {normalized_work}",
+        }
+
+    def _parse_tags_output(self, content: str) -> list[str]:
+        raw = (content or "").strip()
+        if not raw:
+            return []
+
+        try:
+            parsed_list = json.loads(raw)
+            if isinstance(parsed_list, list):
+                return [
+                    self._clean_field_value(item, max_len=40)
+                    for item in parsed_list
+                    if self._clean_field_value(item, max_len=40)
+                ]
+        except Exception:  # noqa: BLE001
+            pass
+
+        parsed_json = self._parse_json(raw)
+        if isinstance(parsed_json, dict):
+            for key in ("tags", "keywords", "tag_list"):
+                value = parsed_json.get(key)
+                if isinstance(value, list):
+                    return [self._clean_field_value(item, max_len=40) for item in value if self._clean_field_value(item, max_len=40)]
+                if isinstance(value, str) and value.strip():
+                    return [
+                        self._clean_field_value(part, max_len=40)
+                        for part in _TAG_SPLIT_RE.split(value)
+                        if self._clean_field_value(part, max_len=40)
+                    ]
+
+        tags: list[str] = []
+        for line in raw.splitlines():
+            cleaned = line.strip().lstrip("-*•").strip()
+            if not cleaned:
+                continue
+            key_lower = cleaned.lower()
+            if key_lower.startswith(("tags:", "keyword:", "keywords:")):
+                _, _, cleaned = cleaned.partition(":")
+                cleaned = cleaned.strip()
+            for piece in _TAG_SPLIT_RE.split(cleaned):
+                tag = self._clean_field_value(piece, max_len=40)
+                if tag:
+                    tags.append(tag)
+
+        if len(tags) == 1 and " " in tags[0]:
+            expanded = [
+                self._clean_field_value(part, max_len=40)
+                for part in re.split(r"[•·]", tags[0])
+                if self._clean_field_value(part, max_len=40)
+            ]
+            if len(expanded) > 1:
+                tags = expanded
+
+        return tags
+
+    def _dedupe_keywords(self, values: list[str], *, limit: int = 16) -> list[str]:
+        output: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            cleaned = self._clean_field_value(item, max_len=40)
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            output.append(cleaned)
+            if len(output) >= limit:
+                break
+        return output
+
+    def _ensure_min_keywords(
+        self,
+        *,
+        current_keywords: list[str],
+        minimum: int,
+        title: str,
+        description: str | None,
+        extracted_text: str,
+        source_type: str,
+        taxonomy: dict[str, str] | None = None,
+    ) -> list[str]:
+        keywords = list(current_keywords)
+        if len(keywords) >= minimum:
+            return keywords
+
+        fallback_candidates: list[str] = []
+        if taxonomy:
+            fallback_candidates.extend(
+                [
+                    taxonomy.get("domain", ""),
+                    taxonomy.get("subdomain", ""),
+                    taxonomy.get("author", ""),
+                    taxonomy.get("work", ""),
+                ]
+            )
+        fallback_candidates.extend(
+            [source_type, title, description or ""]
+        )
+
+        token_source = " ".join(part for part in [title, description or "", extracted_text] if part)
+        token_candidates = re.findall(r"[A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9_-]{2,}", token_source.lower())
+        fallback_candidates.extend(token_candidates[:60])
+
+        keywords = self._dedupe_keywords([*keywords, *fallback_candidates], limit=24)
+
+        if len(keywords) < minimum:
+            while len(keywords) < minimum:
+                keywords.append(f"tag-{len(keywords) + 1}")
+
+        return keywords
+
+    async def _generate_search_tags(
+        self,
+        *,
+        source_type: str,
+        title: str,
+        description: str | None,
+        extracted_text: str,
+        source_url: str | None,
+        document_type: str | None,
+        semantic_theme: str | None,
+        semantic_subtheme: str | None,
+        taxonomy: dict[str, str] | None,
+        selected_model: str,
+        image_b64: str | None = None,
+        minimum_tags: int = 10,
+    ) -> list[str]:
+        payload = {
+            "source_type": source_type,
+            "title": title,
+            "description": description,
+            "source_url": source_url,
+            "document_type": document_type,
+            "semantic_theme": semantic_theme,
+            "semantic_subtheme": semantic_subtheme,
+            "taxonomy_path": taxonomy.get("path") if taxonomy else None,
+            "content_preview": (extracted_text or "")[:7000],
+        }
+
+        message: dict[str, object] = {
+            "role": "user",
+            "content": (
+                "Genera tag di ricerca utili per retrieval semantico.\n"
+                f"Restituisci SOLO JSON valido nel formato {{\"tags\":[...]}} con almeno {minimum_tags} tag.\n"
+                "Tag brevi (1-4 parole), pertinenti, senza spiegazioni."
+                f"\nInput: {json.dumps(payload, ensure_ascii=False)}"
+            ),
+        }
+        if image_b64:
+            message["images"] = [image_b64]
+
+        request_body = {
+            "model": selected_model,
+            "stream": False,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Sei un motore di tagging semantico. Produci solo JSON.",
+                },
+                message,
+            ],
+        }
+
+        parsed_tags: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                resolved_model = await self._resolve_model_name(client, selected_model)
+                request_body["model"] = resolved_model
+                response = await client.post(f"{self.base_url}/api/chat", json=request_body)
+                response.raise_for_status()
+                response_json = response.json()
+            content = str(response_json.get("message", {}).get("content", ""))
+            parsed_tags = self._parse_tags_output(content)
+        except Exception:  # noqa: BLE001
+            parsed_tags = []
+
+        normalized = self._dedupe_keywords(parsed_tags, limit=20)
+        normalized = self._ensure_min_keywords(
+            current_keywords=normalized,
+            minimum=minimum_tags,
+            title=title,
+            description=description,
+            extracted_text=extracted_text,
+            source_type=source_type,
+            taxonomy=taxonomy,
+        )
+        return self._dedupe_keywords(normalized, limit=20)
+
     def _register_generated_category(self, value: object) -> str:
-        candidate = self._titleize_category(value)
+        candidate = self._merge_category_label(value)
         if not candidate:
             return "General"
 
@@ -589,6 +1271,91 @@ class OllamaClassifier:
                 source_url=source_url,
                 description=description,
             )
+            semantic_theme = normalized.get("theme")
+            semantic_subtheme = normalized.get("subtheme")
+
+            taxonomy = await self._select_taxonomy(
+                title=title,
+                description=description,
+                extracted_text=extracted_text,
+                source_type=source_type,
+                source_url=source_url,
+                mime_type=mime_type,
+                selected_model=self.text_model,
+            )
+
+            selected_domain = self._normalize_canonical_theme(
+                taxonomy.get("domain") or normalized.get("canonical_theme") or normalized.get("theme"),
+                allow_create=True,
+            )
+            selected_subdomain = self._clean_field_value(taxonomy.get("subdomain") or "Generale", max_len=120) or "Generale"
+            selected_author = self._sanitize_author_name(taxonomy.get("author")) or "Sconosciuto"
+            selected_work = self._clean_field_value(taxonomy.get("work"), max_len=180)
+
+            if (
+                selected_domain == "General"
+                and self._normalize_canonical_theme(semantic_theme, allow_create=True) != "General"
+            ):
+                taxonomy = self._ensure_taxonomy_branch(
+                    domain=semantic_theme,
+                    subdomain=semantic_subtheme or "Generale",
+                    author=selected_author,
+                    work=title or semantic_subtheme or "Contenuto non classificato",
+                )
+                selected_domain = taxonomy["domain"]
+                selected_subdomain = taxonomy["subdomain"]
+                selected_author = taxonomy["author"]
+                selected_work = taxonomy["work"]
+            else:
+                taxonomy = self._ensure_taxonomy_branch(
+                    domain=selected_domain,
+                    subdomain=selected_subdomain,
+                    author=selected_author,
+                    work=selected_work or title or "Contenuto non classificato",
+                )
+                selected_domain = taxonomy["domain"]
+                selected_subdomain = taxonomy["subdomain"]
+                selected_author = taxonomy["author"]
+                selected_work = taxonomy["work"]
+
+            normalized["canonical_theme"] = selected_domain
+            normalized["subtheme"] = self._clean_field_value(selected_subdomain, max_len=120)
+
+            llm_tags = await self._generate_search_tags(
+                source_type=source_type,
+                title=normalized["title"],
+                description=description,
+                extracted_text=extracted_text,
+                source_url=source_url,
+                document_type=normalized["document_type"],
+                semantic_theme=semantic_theme,
+                semantic_subtheme=semantic_subtheme,
+                taxonomy=taxonomy,
+                selected_model=selected_model,
+                image_b64=image_b64,
+                minimum_tags=10,
+            )
+            merged_keywords = self._dedupe_keywords(
+                [
+                    *llm_tags,
+                    *normalized.get("keywords", []),
+                    taxonomy.get("domain", ""),
+                    taxonomy.get("subdomain", ""),
+                    taxonomy.get("author", ""),
+                    taxonomy.get("work", ""),
+                ],
+                limit=20,
+            )
+            normalized["keywords"] = self._ensure_min_keywords(
+                current_keywords=merged_keywords,
+                minimum=10,
+                title=normalized["title"],
+                description=description,
+                extracted_text=extracted_text,
+                source_type=source_type,
+                taxonomy=taxonomy,
+            )[:20]
+
             return ClassificationResult(
                 title=normalized["title"],
                 document_type=normalized["document_type"],
@@ -604,6 +1371,13 @@ class OllamaClassifier:
                 model_used=resolved_model,
                 raw=response_json,
                 fallback_used=False,
+                semantic_theme=semantic_theme,
+                semantic_subtheme=semantic_subtheme,
+                taxonomy_domain=taxonomy.get("domain"),
+                taxonomy_subdomain=taxonomy.get("subdomain"),
+                taxonomy_author=taxonomy.get("author"),
+                taxonomy_work=taxonomy.get("work"),
+                taxonomy_path=taxonomy.get("path"),
             )
         except Exception as exc:  # noqa: BLE001
             fallback = self._fallback_classification(
@@ -1228,7 +2002,7 @@ class OllamaClassifier:
         }
 
     def _normalize_canonical_theme(self, value: object, *, allow_create: bool = False) -> str:
-        candidate = self._titleize_category(value)
+        candidate = self._merge_category_label(value)
         if not candidate:
             return "General"
 
@@ -1294,9 +2068,23 @@ class OllamaClassifier:
         else:
             relevance, conceptual = 0.5, 0.5
 
-        keywords = [token for token in matched if token][:8]
+        keywords = [token for token in matched if token][:10]
         if not keywords:
-            keywords = [w for w in [source_type, mime_type or "", inferred_canonical] if w][:8]
+            keywords = [w for w in [source_type, mime_type or "", inferred_canonical] if w][:10]
+        keywords = self._ensure_min_keywords(
+            current_keywords=self._dedupe_keywords(keywords, limit=20),
+            minimum=10,
+            title=title,
+            description=description,
+            extracted_text=extracted_text,
+            source_type=source_type,
+            taxonomy={
+                "domain": inferred_canonical,
+                "subdomain": "Generale",
+                "author": "Sconosciuto",
+                "work": "Contenuto non classificato",
+            },
+        )[:20]
 
         return ClassificationResult(
             title=title,
@@ -1313,4 +2101,11 @@ class OllamaClassifier:
             model_used=selected_model,
             raw={},
             fallback_used=True,
+            semantic_theme=inferred_canonical,
+            semantic_subtheme=None,
+            taxonomy_domain=inferred_canonical,
+            taxonomy_subdomain="Generale",
+            taxonomy_author="Sconosciuto",
+            taxonomy_work="Contenuto non classificato",
+            taxonomy_path=f"{inferred_canonical} > Generale > Sconosciuto > Contenuto non classificato",
         )

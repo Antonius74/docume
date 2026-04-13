@@ -24,7 +24,16 @@ def _flatten_labels(labels: dict | None) -> str:
         "tipologia_documento",
         "contenuto",
         "dettaglio_contenuto",
+        "taxonomy_type",
+        "taxonomy_genre",
+        "taxonomy_title",
+        "taxonomy_domain",
+        "taxonomy_subdomain",
+        "taxonomy_author",
+        "taxonomy_work",
+        "taxonomy_path",
         "author",
+        "tags",
         "youtube_channel",
         "site_name",
         "domain",
@@ -73,4 +82,3 @@ def build_search_text(
     if max_len > 0:
         merged = merged[:max_len]
     return _clean_text(merged)
-

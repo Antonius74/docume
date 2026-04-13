@@ -257,14 +257,14 @@ async def _reclassify_existing_resources() -> None:
                     prefill_changed = True
 
             # Keep thematic path aligned for existing rows too, including migration
-            # from legacy flat layout to macro layout:
-            # /themes/<doc|link>/<contenuto>/<autore>/<dettaglio>/<file>
+            # from legacy layouts to macro layout:
+            # /themes/<tipo>/<genere>/<autore>/<titolo>/<file>
             thematic_path = resource.thematic_path or ""
             has_macro_layout = False
             if "/themes/" in thematic_path:
                 relative = thematic_path.split("/themes/", 1)[1]
                 segments = [segment for segment in relative.split("/") if segment]
-                if len(segments) >= 5 and segments[0] in {"doc", "link"}:
+                if len(segments) >= 5:
                     has_macro_layout = True
             if not has_macro_layout:
                 refreshed_thematic_path = save_in_thematic_folder(resource, settings.themes_root)
@@ -277,7 +277,7 @@ async def _reclassify_existing_resources() -> None:
                     resource.thematic_path = refreshed_thematic_path
                     prefill_changed = True
 
-            if labels.get("classification_source") != "llm-content-v3-3fields" or labels.get("fallback_used") is True:
+            if labels.get("classification_source") != "llm-content-v5-type-genre-author-title" or labels.get("fallback_used") is True:
                 resources.append(resource)
 
         if not resources:
@@ -285,8 +285,6 @@ async def _reclassify_existing_resources() -> None:
                 db.commit()
             return
 
-        # Prima versione: riclassifica un batch ridotto in startup per non rallentare troppo.
-        resources = resources[:50]
         changed = prefill_changed
 
         for resource in resources:
@@ -322,6 +320,10 @@ async def _reclassify_existing_resources() -> None:
             if resource.language != classification.language:
                 resource.language = classification.language
                 changed = True
+            taxonomy_author = classifier._sanitize_author_name(classification.taxonomy_author)
+            if taxonomy_author and resource.author_name != taxonomy_author:
+                resource.author_name = taxonomy_author
+                changed = True
             llm_labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
             if not resource.author_name:
                 inferred_author = await classifier.infer_author_name(
@@ -351,11 +353,20 @@ async def _reclassify_existing_resources() -> None:
                 **llm_labels,
                 "fallback_used": classification.fallback_used,
                 "model": classification.model_used,
-                "classification_source": "llm-content-v3-3fields",
+                "classification_source": "llm-content-v5-type-genre-author-title",
                 "tipologia_documento": classification.document_type,
-                "contenuto": classification.theme,
-                "dettaglio_contenuto": classification.subtheme,
+                "contenuto": classification.semantic_theme or classification.theme,
+                "dettaglio_contenuto": classification.semantic_subtheme or classification.subtheme,
+                "taxonomy_type": classification.taxonomy_domain or classification.canonical_theme,
+                "taxonomy_genre": classification.taxonomy_subdomain,
+                "taxonomy_title": classification.taxonomy_work,
+                "taxonomy_domain": classification.taxonomy_domain or classification.canonical_theme,
+                "taxonomy_subdomain": classification.taxonomy_subdomain,
+                "taxonomy_author": classification.taxonomy_author,
+                "taxonomy_work": classification.taxonomy_work,
+                "taxonomy_path": classification.taxonomy_path,
                 "author": resource.author_name,
+                "tags": classification.keywords,
             }
             if resource.llm_labels != updated_labels:
                 resource.llm_labels = updated_labels
@@ -482,6 +493,8 @@ def list_resources(
 
     query = select(Resource)
     theme_expr = func.coalesce(Resource.canonical_theme, Resource.inferred_theme, "Uncategorized")
+    genre_expr = func.coalesce(func.nullif(func.trim(Resource.inferred_subtheme), ""), "Generale")
+    author_name_expr = func.coalesce(func.nullif(func.trim(Resource.author_name), ""), "Sconosciuto")
 
     normalized_q = (q or "").strip()
     expansion = None
@@ -550,12 +563,15 @@ def list_resources(
         query = query.where(func.lower(theme_expr) == theme.lower())
 
     if author:
-        author_expr = func.coalesce(func.nullif(func.trim(Resource.author_name), ""), "Sconosciuto")
-        query = query.where(func.lower(author_expr) == author.lower())
+        query = query.where(
+            or_(
+                func.lower(author_name_expr) == author.lower(),
+                func.lower(genre_expr) == author.lower(),
+            )
+        )
 
     if detail:
-        detail_expr = func.coalesce(func.nullif(func.trim(Resource.inferred_subtheme), ""), "Generale")
-        query = query.where(func.lower(detail_expr) == detail.lower())
+        query = query.where(func.lower(author_name_expr) == detail.lower())
 
     if source_type in {"file", "link"}:
         query = query.where(Resource.source_type == source_type)
@@ -858,17 +874,17 @@ def theme_tree(
     db: Session = Depends(get_db),
 ):
     theme_expr = func.coalesce(Resource.canonical_theme, Resource.inferred_theme, "Uncategorized")
+    genre_expr = func.coalesce(func.nullif(func.trim(Resource.inferred_subtheme), ""), "Generale")
     author_expr = func.coalesce(func.nullif(func.trim(Resource.author_name), ""), "Sconosciuto")
-    detail_expr = func.coalesce(func.nullif(func.trim(Resource.inferred_subtheme), ""), "Generale")
 
     query = (
         select(
             theme_expr.label("theme"),
-            author_expr.label("author"),
-            detail_expr.label("detail"),
+            genre_expr.label("author"),
+            author_expr.label("detail"),
             func.count(Resource.id).label("count"),
         )
-        .group_by(theme_expr, author_expr, detail_expr)
+        .group_by(theme_expr, genre_expr, author_expr)
     )
     if source_type in {"file", "link"}:
         query = query.where(Resource.source_type == source_type)
@@ -942,8 +958,8 @@ def theme_tree(
 def list_folders():
     output: list[dict] = []
 
-    # New macro hierarchy:
-    # storage/themes/<doc|link>/<contenuto>/<autore>/<dettaglio>/<resource-file>
+    # Macro hierarchy:
+    # storage/themes/<tipo>/<genere>/<autore>/<titolo>/<resource-file>
     for source_dir in sorted(settings.themes_root.glob("*")):
         if not source_dir.is_dir():
             continue
@@ -975,8 +991,7 @@ def list_folders():
                             }
                         )
                 else:
-                    # Compatibility with intermediate migrations:
-                    # storage/themes/<doc|link>/<contenuto>/<dettaglio>/<resource-file>
+                    # Compatibility with intermediate migrations.
                     entries = []
                     count = 0
                     for entry in sorted(author_dir.iterdir()):

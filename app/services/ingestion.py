@@ -159,17 +159,28 @@ class IngestionService:
             source_url=url,
             source_name=source_name,
         )
+        taxonomy_author = self.classifier._sanitize_author_name(classification.taxonomy_author)
+        final_author = taxonomy_author or author_name
 
         safe_keywords = self._sanitize_json_like(classification.keywords) or []
         safe_llm_labels = self._sanitize_json_like(
             {
                 "fallback_used": classification.fallback_used,
                 "model": classification.model_used,
-                "classification_source": "llm-content-v3-3fields",
+                "classification_source": "llm-content-v5-type-genre-author-title",
                 "tipologia_documento": classification.document_type,
-                "contenuto": classification.theme,
-                "dettaglio_contenuto": classification.subtheme,
-                "author": author_name,
+                "contenuto": classification.semantic_theme or classification.theme,
+                "dettaglio_contenuto": classification.semantic_subtheme or classification.subtheme,
+                "taxonomy_type": classification.taxonomy_domain or classification.canonical_theme,
+                "taxonomy_genre": classification.taxonomy_subdomain,
+                "taxonomy_title": classification.taxonomy_work,
+                "taxonomy_domain": classification.taxonomy_domain or classification.canonical_theme,
+                "taxonomy_subdomain": classification.taxonomy_subdomain,
+                "taxonomy_author": classification.taxonomy_author,
+                "taxonomy_work": classification.taxonomy_work,
+                "taxonomy_path": classification.taxonomy_path,
+                "author": final_author,
+                "tags": safe_keywords,
                 "preview_image_url": self._sanitize_text(extracted.get("preview_image_url"), max_len=1000),
             }
         )
@@ -186,7 +197,7 @@ class IngestionService:
             size_bytes=None,
             sha256=None,
             language=classification.language,
-            author_name=author_name,
+            author_name=final_author,
             inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
             inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
             canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),
@@ -199,7 +210,7 @@ class IngestionService:
                 summary=self._sanitize_text(classification.summary, max_len=1200),
                 content_text=searchable_text,
                 source_url=normalized_url,
-                author_name=author_name,
+                author_name=final_author,
                 inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
                 inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
                 canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),
@@ -286,17 +297,28 @@ class IngestionService:
             source_name=filename,
             image_b64=extracted.get("image_b64"),
         )
+        taxonomy_author = self.classifier._sanitize_author_name(classification.taxonomy_author)
+        final_author = taxonomy_author or author_name
 
         safe_keywords = self._sanitize_json_like(classification.keywords) or []
         safe_llm_labels = self._sanitize_json_like(
             {
                 "fallback_used": classification.fallback_used,
                 "model": classification.model_used,
-                "classification_source": "llm-content-v3-3fields",
+                "classification_source": "llm-content-v5-type-genre-author-title",
                 "tipologia_documento": classification.document_type,
-                "contenuto": classification.theme,
-                "dettaglio_contenuto": classification.subtheme,
-                "author": author_name,
+                "contenuto": classification.semantic_theme or classification.theme,
+                "dettaglio_contenuto": classification.semantic_subtheme or classification.subtheme,
+                "taxonomy_type": classification.taxonomy_domain or classification.canonical_theme,
+                "taxonomy_genre": classification.taxonomy_subdomain,
+                "taxonomy_title": classification.taxonomy_work,
+                "taxonomy_domain": classification.taxonomy_domain or classification.canonical_theme,
+                "taxonomy_subdomain": classification.taxonomy_subdomain,
+                "taxonomy_author": classification.taxonomy_author,
+                "taxonomy_work": classification.taxonomy_work,
+                "taxonomy_path": classification.taxonomy_path,
+                "author": final_author,
+                "tags": safe_keywords,
                 "preview_image_url": None,
             }
         )
@@ -314,7 +336,7 @@ class IngestionService:
             size_bytes=saved["size_bytes"],
             sha256=saved["sha256"],
             language=classification.language,
-            author_name=author_name,
+            author_name=final_author,
             inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
             inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
             canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),
@@ -327,7 +349,7 @@ class IngestionService:
                 summary=self._sanitize_text(classification.summary, max_len=1200),
                 content_text=searchable_text,
                 source_url=None,
-                author_name=author_name,
+                author_name=final_author,
                 inferred_theme=self._sanitize_text(classification.theme, max_len=120) or "General",
                 inferred_subtheme=self._sanitize_text(classification.subtheme, max_len=120),
                 canonical_theme=self._sanitize_text(classification.canonical_theme, max_len=120),

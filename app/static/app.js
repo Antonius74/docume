@@ -462,10 +462,6 @@ async function loadAuthors() {
     throw new Error("Impossibile caricare gli autori");
   }
   state.authors = await response.json();
-  if (state.selectedAuthor && !state.authors.some((item) => item.author === state.selectedAuthor)) {
-    state.selectedAuthor = "";
-    state.selectedDetail = "";
-  }
   renderAuthorSelect();
 }
 

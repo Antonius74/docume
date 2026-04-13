@@ -33,10 +33,28 @@ def source_macro_bucket(source_type: str | None) -> str:
     return slugify_theme(value or "doc")
 
 
-def detail_macro_bucket(resource: Resource) -> str:
-    labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+def _labels(resource: Resource) -> dict:
+    return resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+
+
+def type_macro_bucket(resource: Resource) -> str:
+    labels = _labels(resource)
+    value = (
+        labels.get("taxonomy_type")
+        or labels.get("taxonomy_domain")
+        or resource.canonical_theme
+        or source_macro_bucket(resource.source_type)
+        or "general"
+    )
+    return slugify_theme(str(value))
+
+
+def genre_macro_bucket(resource: Resource) -> str:
+    labels = _labels(resource)
     detail_value = (
-        resource.inferred_subtheme
+        labels.get("taxonomy_genre")
+        or labels.get("taxonomy_subdomain")
+        or resource.inferred_subtheme
         or labels.get("dettaglio_contenuto")
         or labels.get("detail")
         or "generale"
@@ -45,15 +63,27 @@ def detail_macro_bucket(resource: Resource) -> str:
 
 
 def author_macro_bucket(resource: Resource) -> str:
-    labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+    labels = _labels(resource)
     author_value = (
         resource.author_name
+        or labels.get("taxonomy_author")
         or labels.get("author")
         or labels.get("autore")
         or labels.get("youtube_channel")
         or "sconosciuto"
     )
     return slugify_theme(str(author_value))
+
+
+def title_macro_bucket(resource: Resource) -> str:
+    labels = _labels(resource)
+    title_value = (
+        labels.get("taxonomy_title")
+        or labels.get("taxonomy_work")
+        or resource.title
+        or "contenuto-non-classificato"
+    )
+    return slugify_theme(str(title_value))[:120] or "contenuto-non-classificato"
 
 
 def save_file_bytes(data: bytes, filename: str, files_root: Path) -> dict[str, str | int]:
@@ -76,7 +106,7 @@ def save_file_bytes(data: bytes, filename: str, files_root: Path) -> dict[str, s
 
 def _write_link_note(resource: Resource, theme_dir: Path) -> Path:
     note_path = theme_dir / f"{resource.id}.md"
-    labels = resource.llm_labels if isinstance(resource.llm_labels, dict) else {}
+    labels = _labels(resource)
     content = {
         "id": resource.id,
         "title": resource.title,
@@ -84,6 +114,10 @@ def _write_link_note(resource: Resource, theme_dir: Path) -> Path:
         "canonical_theme": resource.canonical_theme,
         "theme": resource.inferred_theme,
         "subtheme": resource.inferred_subtheme,
+        "taxonomy_type": labels.get("taxonomy_type") or labels.get("taxonomy_domain"),
+        "taxonomy_genre": labels.get("taxonomy_genre") or labels.get("taxonomy_subdomain"),
+        "taxonomy_author": labels.get("taxonomy_author") or resource.author_name,
+        "taxonomy_title": labels.get("taxonomy_title") or labels.get("taxonomy_work") or resource.title,
         "author": resource.author_name,
         "keywords": resource.keywords,
         "summary": resource.summary,
@@ -101,6 +135,9 @@ def _write_link_note(resource: Resource, theme_dir: Path) -> Path:
             f"- Canonical Theme: **{resource.canonical_theme or resource.inferred_theme}**",
             f"- Theme: **{resource.inferred_theme}**",
             f"- Subtheme: {resource.inferred_subtheme or 'N/A'}",
+            f"- Taxonomy Type: {labels.get('taxonomy_type') or labels.get('taxonomy_domain') or 'N/A'}",
+            f"- Taxonomy Genre: {labels.get('taxonomy_genre') or labels.get('taxonomy_subdomain') or 'N/A'}",
+            f"- Taxonomy Title: {labels.get('taxonomy_title') or labels.get('taxonomy_work') or resource.title or 'N/A'}",
             f"- Author: {resource.author_name or labels.get('author') or 'N/A'}",
             f"- Source URL: {resource.source_url or 'N/A'}",
             f"- Uploaded: {resource.uploaded_at.isoformat() if resource.uploaded_at else 'N/A'}",
@@ -120,12 +157,12 @@ def _write_link_note(resource: Resource, theme_dir: Path) -> Path:
 
 
 def save_in_thematic_folder(resource: Resource, themes_root: Path) -> str:
-    source_bucket = source_macro_bucket(resource.source_type)
-    content_bucket = slugify_theme(resource.canonical_theme or resource.inferred_theme)
+    type_bucket = type_macro_bucket(resource)
+    genre_bucket = genre_macro_bucket(resource)
     author_bucket = author_macro_bucket(resource)
-    detail_bucket = detail_macro_bucket(resource)
+    title_bucket = title_macro_bucket(resource)
 
-    theme_dir = themes_root / source_bucket / content_bucket / author_bucket / detail_bucket
+    theme_dir = themes_root / type_bucket / genre_bucket / author_bucket / title_bucket
     theme_dir.mkdir(parents=True, exist_ok=True)
 
     if resource.stored_path:
